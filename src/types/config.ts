@@ -1,0 +1,92 @@
+// Values must match Rust enum variant names (rmp_serde serializes as PascalCase)
+export enum DeliverPolicy {
+  All    = 'All',
+  Last   = 'Last',
+  New    = 'New',
+  BySeq  = 'ByStartSeq',
+  ByTime = 'ByStartTime',
+}
+
+export enum JournalType {
+  Memory   = 'Memory',
+  Tolerant = 'Tolerant',
+  Strict   = 'Strict',
+}
+
+export enum AckPolicy {
+  Explicit = 'explicit',
+  None     = 'none',
+}
+
+export interface FlushConfig {
+  intervalMs?:  number   // default: 10
+  maxMessages?: number   // default: 512
+  maxBytes?:    number   // default: 65_536
+}
+
+export type JournalConfig =
+  | { type: JournalType.Memory }
+  | { type: JournalType.Tolerant }
+  | { type: JournalType.Strict; flush?: FlushConfig }
+
+export interface CreditRule {
+  pattern: string
+  max:     number
+}
+
+export interface StreamConfig {
+  subjectFilter:  string
+  journal?:       JournalConfig
+  maxMsgs?:       number
+  maxBytes?:      number
+  maxAgeMs?:      number
+}
+
+export interface ConsumerConfig {
+  name?:                string   // defaults to stream name when created via stream.consumer()
+  filter?:              string   // defaults to "${streamName}.>" when created via stream.consumer()
+  fanout?:              boolean   // broadcast — every subscriber receives every message
+  deliverPolicy?:       DeliverPolicy
+  startSeq?:            bigint
+  startTime?:           bigint
+  maxAckPending?:       number
+  ackWaitMs?:           number
+  maxDeliver?:          number
+  removeUnusedAfterMs?: number
+  creditRules?:         CreditRule[]
+}
+
+export interface SubscribeOptions {
+  maxAckPending?:  number
+  fetchBatchSize?: number
+  fetchTimeoutMs?: number
+}
+
+export interface PublishOptions {
+  noAck?:   boolean
+  headers?: Record<string, string>
+}
+
+export interface ReconnectConfig {
+  enabled?:     boolean
+  maxAttempts?: number
+  intervalMs?:  number
+  jitter?:      boolean
+}
+
+export interface TlsConfig {
+  enabled?: boolean
+  ca?:      Buffer | string
+  cert?:    Buffer | string
+  key?:     Buffer | string
+}
+
+export interface ClientConfig {
+  servers:    string[]
+  prefix?:    string
+  timeout?:   number
+  reconnect?: ReconnectConfig
+  tls?:       TlsConfig
+  // Pino-compatible logger. Default: silent.
+  logger?:    import('../common/logger').Logger
+}

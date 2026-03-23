@@ -1,0 +1,47 @@
+{
+  "name": "arbitro-ts",
+  "version": "0.1.0",
+  "description": "Official TypeScript client for the Arbitro message broker",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "bench": "tsx benches/throughput.ts"
+  },
+  "peerDependencies": {
+    "@types/node": ">=18",
+    "pino": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "pino": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "dependencies": {
+    "arbitro-ts": "file:",
+    "msgpackr": "^1.10.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
