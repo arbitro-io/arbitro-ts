@@ -1,33 +1,20 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { ArbitroClient, JournalType } from '../../src'
-import { startServer, waitUntil, type RealServer } from '../helpers/real-server'
+import { createClient, waitUntil } from '../helpers/client'
 
-let server: RealServer
 let client: ArbitroClient
 let counter = 0
 
 function uid(): string { return `p${++counter}` }
 
-function setup(c: ArbitroClient, name: string): void {
-  c.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
-  c.createConsumer(name, { name, filter: `${name}.>` })
-}
-
-beforeAll(async () => {
-  server = await startServer()
-  client = new ArbitroClient({ servers: [server.addr] })
-  await client.connect()
-})
-
-afterAll(async () => {
-  await client.close()
-  await server.stop()
-})
+beforeAll(async () => { client = await createClient() })
+afterAll(async () => { await client.close() })
 
 describe('publish/subscribe', () => {
   it('fire-and-forget publish reaches subscriber', async () => {
     const name = uid()
-    setup(client, name)
+    await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
+    await client.createConsumer(name, { name, filter: `${name}.>` })
 
     const received: string[] = []
     const sub = await client.subscribe(name, (msg) => received.push(msg.data().toString()))
@@ -41,13 +28,17 @@ describe('publish/subscribe', () => {
 
   it('publishAck resolves after server confirms receipt', async () => {
     const name = uid()
-    setup(client, name)
-    await expect(client.publishAck(`${name}.e`, Buffer.from('acked'))).resolves.toBeUndefined()
+    await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
+    await client.createConsumer(name, { name, filter: `${name}.>` })
+    await expect(
+      client.publishAck(`${name}.e`, Buffer.from('acked')),
+    ).resolves.toBeUndefined()
   })
 
   it('publishBatch — all messages reach subscriber', async () => {
     const name = uid()
-    setup(client, name)
+    await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
+    await client.createConsumer(name, { name, filter: `${name}.>` })
 
     const received: string[] = []
     const sub = await client.subscribe(name, (msg) => received.push(msg.data().toString()))
@@ -65,11 +56,12 @@ describe('publish/subscribe', () => {
 
   it('fanout consumer — two subscribers each receive every message', async () => {
     const name = uid()
-    client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
-    client.createConsumer(name, { name, filter: `${name}.>`, fanout: true })
+    await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
+    await client.createConsumer(name, { name, filter: `${name}.>`, fanout: true })
 
     const bucket1: string[] = []
     const bucket2: string[] = []
+
     const sub1 = await client.subscribe(name, (msg) => bucket1.push(msg.data().toString()))
     const sub2 = await client.subscribe(name, (msg) => bucket2.push(msg.data().toString()))
 

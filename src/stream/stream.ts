@@ -1,19 +1,28 @@
 import type { ArbitroClient } from '../client/client'
 import type { StreamConfig, ConsumerConfig } from '../types/config'
 import type { Encoding } from '../utils/codec'
-import { Consumer } from '../consumer/consumer'
+import type { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
 
-// Stream — thin context wrapper that carries the stream name.
-// No network calls at construction — only at .create() and .delete().
+// Stream — context object carrying name + config.
+// No network calls at construction — only at .create(), .delete(), and .consumer().
 export class Stream {
+  private _config: StreamConfig | undefined
+
   constructor(
     private readonly client: ArbitroClient,
     readonly name: string,
-  ) {}
+    config?: StreamConfig,
+  ) {
+    this._config = config
+  }
 
-  create(config: StreamConfig): this {
-    this.client.createStream(this.name, config)
+  /** The StreamConfig used to create this stream, if known. */
+  get config(): StreamConfig | undefined { return this._config }
+
+  async create(config: StreamConfig): Promise<this> {
+    this._config = config
+    await this.client.createStream(this.name, config)
     return this
   }
 
@@ -21,15 +30,16 @@ export class Stream {
     this.client.deleteStream(this.name)
   }
 
-  // Returns a Consumer pre-filled with this stream's name — no network call.
-  // All config fields are optional: name defaults to stream name, filter defaults to "${name}.>".
-  consumer(config?: Partial<ConsumerConfig>): Consumer {
-    const resolved: ConsumerConfig = {
-      ...config,
-      name:   config?.name   ?? this.name,
-      filter: config?.filter ?? `${this.name}.>`,
+  // Creates the consumer on the server with defaults derived from this stream.
+  // name defaults to stream name, filter defaults to "${name}.>".
+  // Any field can be overridden.
+  async consumer(overrides?: Partial<ConsumerConfig>): Promise<Consumer> {
+    const config: ConsumerConfig = {
+      ...overrides,
+      name:   overrides?.name   ?? this.name,
+      filter: overrides?.filter ?? `${this.name}.>`,
     }
-    return new Consumer(this.client, this.name, resolved)
+    return this.client.createConsumer(this.name, config)
   }
 
   // Returns a Topic<T> bound to subject + codec — no network call.

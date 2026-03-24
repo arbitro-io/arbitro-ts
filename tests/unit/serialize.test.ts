@@ -52,14 +52,14 @@ describe('serializeConsumerConfig', () => {
     expect(wire['filter']).toBe('orders.>')
   })
 
-  it('encodes fanout flag', () => {
+  it('encodes fanout as deliver_mode Fanout', () => {
     const wire = unpack(serializeConsumerConfig({ name: 'broadcast', filter: 'events.>', fanout: true }))
-    expect(wire['fanout']).toBe(true)
+    expect(wire['deliver_mode']).toBe('Fanout')
   })
 
-  it('omits fanout when not set', () => {
+  it('omits deliver_mode when fanout not set', () => {
     const wire = unpack(serializeConsumerConfig({ name: 'w', filter: 'x' }))
-    expect(wire['fanout']).toBeUndefined()
+    expect(wire['deliver_mode']).toBeUndefined()
   })
 
   it('encodes deliver_policy', () => {

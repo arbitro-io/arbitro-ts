@@ -1,7 +1,6 @@
 import type { ArbitroClient } from '../client/client'
 import type { Encoding } from '../utils/codec'
 import type { Subscription } from '../subscription/subscription'
-import type { PublishOptions } from '../types/config'
 import { makeLazyMessage, type LazyMessage } from './lazy-message'
 
 // Topic<T> — binds a subject + codec so publish/subscribe are always typed.
@@ -18,8 +17,8 @@ export class Topic<T extends Record<string, unknown>> {
     this.fields = (codec as { fields?: string[] }).fields ?? []
   }
 
-  publish(value: T, opts?: PublishOptions): void {
-    this.client.publish(this.subject, this.codec.encode(value), opts)
+  publish(value: T): void {
+    this.client.publish(this.subject, this.codec.encode(value))
   }
 
   async publishAck(value: T): Promise<void> {

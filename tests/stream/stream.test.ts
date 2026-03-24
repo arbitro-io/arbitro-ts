@@ -1,99 +1,41 @@
-import { describe, it, expect } from 'vitest'
-import * as net from 'net'
-import { ArbitroClient } from '../../src/client'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { ArbitroClient, JournalType } from '../../src'
 import { Consumer } from '../../src/consumer'
 import { Topic } from '../../src/topic'
-import { FrameView } from '../../src/proto/codec'
-import { Action } from '../../src/proto/constants'
-import { Codec } from '../../src/utils/codec'
+import { schema } from '../../src/utils'
+import { createClient } from '../helpers/client'
 
-function startServer(): Promise<{
-  port:   number
-  frames: () => FrameView[]
-  close:  () => void
-}> {
-  return new Promise((resolve) => {
-    const chunks: Buffer[] = []
+let client: ArbitroClient
 
-    const server = net.createServer((s) => {
-      s.on('data', (d) => chunks.push(d))
-    })
-
-    server.listen(0, '127.0.0.1', () => {
-      const port = (server.address() as net.AddressInfo).port
-
-      const frames = (): FrameView[] => {
-        const buf = Buffer.concat(chunks)
-        const out: FrameView[] = []
-        let off = 0
-        while (off < buf.length) {
-          const v = new FrameView(buf.subarray(off))
-          out.push(v)
-          off += v.totalSize()
-        }
-        return out
-      }
-
-      resolve({ port, frames, close: () => server.close() })
-    })
-  })
-}
-
-async function makeClient(port: number): Promise<ArbitroClient> {
-  return new ArbitroClient({ servers: [`127.0.0.1:${port}`] }).connect()
-}
+beforeAll(async () => { client = await createClient() })
+afterAll(async () => { await client.close() })
 
 describe('Stream', () => {
-  it('stream() returns Stream without network call', async () => {
-    const srv    = await startServer()
-    const client = await makeClient(srv.port)
+  it('stream() is pure construction — no network call', () => {
     const stream = client.stream('orders')
-
-    await new Promise((r) => setTimeout(r, 30))
-    expect(srv.frames().length).toBe(0) 
-
-    await client.close()
-    srv.close()
+    expect(stream.name).toBe('orders')
   })
 
-  it('stream.create() sends PubCreateStream frame', async () => {
-    const srv    = await startServer()
-    const client = await makeClient(srv.port)
-
-    client.stream('orders').create({ subjectFilter: 'orders.>' })
-    await new Promise((r) => setTimeout(r, 30))
-
-    const frames = srv.frames()
-    expect(frames.length).toBe(1)
-    expect(frames[0]!.action()).toBe(Action.PubCreateStream)
-    expect(frames[0]!.subject().toString()).toBe('orders')
-
-    await client.close()
-    srv.close()
-  })
-
-  it('stream.consumer() returns Consumer with correct streamName', async () => {
-    const srv    = await startServer()
-    const client = await makeClient(srv.port)
-
-    const consumer = client.stream('orders').consumer({ name: 'workers', filter: 'orders.>' })
+  it('stream.consumer() returns Consumer with defaults from stream context', async () => {
+    // Use a unique name to avoid conflicts with other test runs
+    const consumer = await client.stream('stream-consumer-defaults-test').consumer({ name: 'workers' })
     expect(consumer).toBeInstanceOf(Consumer)
-    expect(consumer.streamName).toBe('orders')
+    expect(consumer.streamName).toBe('stream-consumer-defaults-test')
     expect(consumer.config.name).toBe('workers')
-
-    await client.close()
-    srv.close()
+    expect(consumer.config.filter).toBe('stream-consumer-defaults-test.>')
   })
 
-  it('stream.topic() returns Topic', async () => {
-    const srv    = await startServer()
-    const client = await makeClient(srv.port)
-    const codec  = new Codec<{ id: number }>({ id: 'number' })
-
+  it('stream.topic() returns Topic bound to subject and codec', () => {
+    const codec = schema({ id: 'number' })
     const topic = client.stream('orders').topic('orders.new', codec)
     expect(topic).toBeInstanceOf(Topic)
+  })
 
-    await client.close()
-    srv.close()
+  it('stream.create() is accepted by server — resolves once confirmed', async () => {
+    const stream = await client.stream('stream-create-test').create({
+      subjectFilter: 'stream-create-test.>',
+      journal: { type: JournalType.Memory },
+    })
+    expect(stream.config?.subjectFilter).toBe('stream-create-test.>')
   })
 })

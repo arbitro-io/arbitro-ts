@@ -1,18 +1,17 @@
 /// <reference types="node" />
 
-export { ArbitroClient }                     from './client'
-export { Stream }                            from './stream'
-export { Consumer }                          from './consumer'
-export { Topic }                             from './topic'
-export { Subscription }                      from './subscription'
-export { Message }                           from './message'
-export { makeLazyMessage, type LazyMessage } from './topic'
-export {
-  DeliverPolicy,
-  JournalType,
-  AckPolicy,
-  ArbitroError,
-} from './types'
+export { DeliverPolicy, JournalType, AckPolicy, ArbitroError } from "./types";
+export { encodeString, decodeString, encodeJson, decodeJson } from "./utils";
+export { makeLazyMessage, type LazyMessage } from "./topic";
+export { Subscription } from "./subscription";
+export { ArbitroClient } from "./client";
+export { Consumer } from "./consumer";
+export { Message } from "./message";
+export { Stream } from "./stream";
+export { Topic } from "./topic";
+
+export type { Logger, LogFn } from "./common/logger";
+
 export type {
   ClientConfig,
   StreamConfig,
@@ -21,17 +20,18 @@ export type {
   FlushConfig,
   CreditRule,
   SubscribeOptions,
-  PublishOptions,
   ReconnectConfig,
   TlsConfig,
-} from './types'
+} from "./types";
+
 export {
   Codec,
   JsonCodec,
   StringCodec,
+  schema,
   type Encoding,
   type Schema,
   type FieldType,
-} from './utils'
-export { encodeString, decodeString, encodeJson, decodeJson } from './utils'
-export type { Logger, LogFn } from './common/logger'
+  type FieldTypeMap,
+  type InferSchema,
+} from "./utils";

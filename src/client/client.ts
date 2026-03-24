@@ -4,10 +4,10 @@ import { Connection } from '../net/connection'
 import { Subscription } from '../subscription/subscription'
 import { ArbitroError } from '../types/error'
 import {
-  ClientConfig, StreamConfig, ConsumerConfig,
-  PublishOptions, SubscribeOptions,
+  ClientConfig, StreamConfig, ConsumerConfig, SubscribeOptions,
 } from '../types/config'
 import { Stream } from '../stream/stream'
+import { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
 import type { Encoding } from '../utils/codec'
 import { serializeStreamConfig, serializeConsumerConfig } from './serialize'
@@ -48,13 +48,11 @@ export class ArbitroClient {
 
   // ── Publish ───────────────────────────────────────────────────────────────
 
-  // Fire-and-forget. Default is NoAck (maximum throughput).
-  // Pass { noAck: false } to get a RepOk confirmation instead.
-  publish(subject: string, data: Buffer, opts?: PublishOptions): void {
-    const noAck = opts?.noAck ?? true
+  /** Fire-and-forget. NoAck flag skips server confirmation — maximum throughput. */
+  publish(subject: string, data: Buffer): void {
     this.conn.send(pack({
       action:  Action.PubPublish,
-      flags:   noAck ? Flags.NoAck : Flags.None,
+      flags:   Flags.NoAck,
       seq:     this.conn.nextSeq(),
       subject: toWireSubject(this.cfg.prefix, subject),
       data,
@@ -125,44 +123,48 @@ export class ArbitroClient {
     return sub
   }
 
-  // ── Stream management (fire-and-forget) ───────────────────────────────────
+  // ── Stream management ─────────────────────────────────────────────────────
 
-  createStream(name: string, config: StreamConfig): void {
-    this.conn.send(pack({
+  /** Create a stream on the server and return the Stream context. Resolves once the server confirms. */
+  async createStream(name: string, config: StreamConfig): Promise<Stream> {
+    await this.conn.sendExpectReply(pack({
       action:  Action.PubCreateStream,
       flags:   Flags.None,
       seq:     this.conn.nextSeq(),
       subject: name,
       data:    serializeStreamConfig(config),
     }))
+    return new Stream(this, name, config)
   }
 
   deleteStream(name: string): void {
     this.conn.send(pack({
       action:  Action.PubDeleteStream,
-      flags:   Flags.None,
+      flags:   Flags.NoAck,
       seq:     this.conn.nextSeq(),
       subject: name,
       data:    Buffer.alloc(0),
     }))
   }
 
-  // ── Consumer management (fire-and-forget) ─────────────────────────────────
+  // ── Consumer management ───────────────────────────────────────────────────
 
-  createConsumer(stream: string, config: ConsumerConfig): void {
-    this.conn.send(pack({
+  /** Create a consumer on the server and return the Consumer context. Resolves once the server confirms. */
+  async createConsumer(stream: string, config: ConsumerConfig): Promise<Consumer> {
+    await this.conn.sendExpectReply(pack({
       action:  Action.PubCreateConsumer,
       flags:   Flags.None,
       seq:     this.conn.nextSeq(),
       subject: stream,
       data:    serializeConsumerConfig(config),
     }))
+    return new Consumer(this, stream, config)
   }
 
   deleteConsumer(name: string): void {
     this.conn.send(pack({
       action:  Action.PubDeleteConsumer,
-      flags:   Flags.None,
+      flags:   Flags.NoAck,
       seq:     this.conn.nextSeq(),
       subject: name,
       data:    Buffer.alloc(0),
@@ -177,18 +179,6 @@ export class ArbitroClient {
 
   topic<T extends Record<string, unknown>>(subject: string, codec: Encoding<T>): Topic<T> {
     return new Topic(this, subject, codec)
-  }
-
-  // Fence: waits until the server has processed all preceding commands on this connection.
-  // Useful to synchronize between separate connections (admin creates → sync → sub subscribes).
-  sync(): Promise<void> {
-    return this.conn.sendExpectReply(pack({
-      action:  Action.SysKeepalive,
-      flags:   Flags.None,
-      seq:     this.conn.nextSeq(),
-      subject: '',
-      data:    Buffer.alloc(0),
-    })).then(() => undefined)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────

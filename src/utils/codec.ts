@@ -2,9 +2,30 @@ import { Packr, Unpackr } from 'msgpackr'
 
 // ── Base interface ─────────────────────────────────────────────────────────
 
+/** Core encode/decode contract. `fields` is required only for schema-based codecs
+ *  that power LazyMessage<T> getters — other encodings may omit it. */
 export interface Encoding<T> {
   encode(value: T): Buffer
   decode(buf: Buffer): T
+  readonly fields?: string[]
+}
+
+// ── FieldType inference ────────────────────────────────────────────────────
+
+/** Maps a FieldType string literal to its corresponding TypeScript type. */
+export type FieldTypeMap = {
+  string:  string
+  number:  number
+  boolean: boolean
+  bigint:  bigint
+  buffer:  Buffer
+  unknown: unknown
+}
+
+/** Infers the TypeScript record type from a schema definition.
+ *  Eliminates the need to define both an interface and a Schema<T>. */
+export type InferSchema<S extends Record<string, FieldType>> = {
+  [K in keyof S]: FieldTypeMap[S[K]]
 }
 
 // ── TextEncoding — abstract base for string-based encodings ───────────────
@@ -64,4 +85,16 @@ export class Codec<T extends Record<string, unknown>> implements Encoding<T> {
   decode(buf: Buffer): T {
     return this.unpackr.unpack(buf) as T
   }
+}
+
+// ── schema() factory ──────────────────────────────────────────────────────
+// Creates a Codec<T> with T inferred from the schema definition.
+// No need to define a separate interface.
+//
+// Before: new Codec<Order>({ id: 'number', status: 'string' })
+//  After: schema({ id: 'number', status: 'string' })   ← type inferred
+
+/** Creates a msgpack Codec with the TypeScript type inferred from the schema definition. */
+export function schema<S extends Record<string, FieldType>>(def: S): Codec<InferSchema<S>> {
+  return new Codec<InferSchema<S>>(def as Schema<InferSchema<S>>)
 }

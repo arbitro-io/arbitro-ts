@@ -46,6 +46,8 @@ export interface ConsumerConfig {
   name?:                string   // defaults to stream name when created via stream.consumer()
   filter?:              string   // defaults to "${streamName}.>" when created via stream.consumer()
   fanout?:              boolean   // broadcast — every subscriber receives every message
+  /** Consumer-side ACK policy. None = fire-and-forget delivery, Explicit = consumer must ACK. */
+  ackPolicy?:           AckPolicy
   deliverPolicy?:       DeliverPolicy
   startSeq?:            bigint
   startTime?:           bigint
@@ -57,14 +59,7 @@ export interface ConsumerConfig {
 }
 
 export interface SubscribeOptions {
-  maxAckPending?:  number
-  fetchBatchSize?: number
   fetchTimeoutMs?: number
-}
-
-export interface PublishOptions {
-  noAck?:   boolean
-  headers?: Record<string, string>
 }
 
 export interface ReconnectConfig {

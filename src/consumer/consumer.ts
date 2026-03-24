@@ -1,5 +1,5 @@
 import type { ArbitroClient } from '../client/client'
-import type { ConsumerConfig } from '../types/config'
+import type { ConsumerConfig, SubscribeOptions } from '../types/config'
 import type { Subscription } from '../subscription/subscription'
 import type { Message } from '../message/message'
 import type { Encoding } from '../utils/codec'
@@ -18,8 +18,8 @@ export class Consumer {
 
   get name(): string { return this.config.name ?? this.streamName }
 
-  create(): this {
-    this.client.createConsumer(this.streamName, this.config)
+  async create(): Promise<this> {
+    await this.client.createConsumer(this.streamName, this.config)
     return this
   }
 
@@ -28,24 +28,28 @@ export class Consumer {
   }
 
   // Raw subscribe — Message with manual ack/nack/decode.
-  subscribe(cb?: RawCallback): Promise<Subscription>
+  subscribe(cb?: RawCallback, opts?: SubscribeOptions): Promise<Subscription>
 
   // Typed subscribe — LazyMessage<T> with schema getters.
   subscribe<T extends Record<string, unknown>>(
     codec: Encoding<T>,
     cb: (msg: LazyMessage<T>) => void,
+    opts?: SubscribeOptions,
   ): Promise<Subscription>
 
   subscribe<T extends Record<string, unknown>>(
     codecOrCb?: Encoding<T> | RawCallback,
-    cb?: (msg: LazyMessage<T>) => void,
+    cbOrOpts?: ((msg: LazyMessage<T>) => void) | SubscribeOptions,
+    opts?: SubscribeOptions,
   ): Promise<Subscription> {
     if (!codecOrCb || typeof codecOrCb === 'function') {
-      return this.client.subscribe(this.name, codecOrCb)
+      return this.client.subscribe(this.name, codecOrCb as RawCallback | undefined, cbOrOpts as SubscribeOptions | undefined)
     }
-    const fields = (codecOrCb as { fields?: string[] }).fields ?? []
+    const codec  = codecOrCb
+    const cb     = cbOrOpts as (msg: LazyMessage<T>) => void
+    const fields = codec.fields ?? []
     return this.client.subscribe(this.name, (raw) => {
-      cb!(makeLazyMessage(raw.data(), codecOrCb, fields, () => raw.ack(), () => raw.nack()))
-    })
+      cb(makeLazyMessage(raw.data(), codec, fields, () => raw.ack(), () => raw.nack()))
+    }, opts)
   }
 }

@@ -1,5 +1,5 @@
 import { Packr } from 'msgpackr'
-import { JournalType, type StreamConfig, type ConsumerConfig } from '../types/config'
+import { AckPolicy, JournalType, type StreamConfig, type ConsumerConfig } from '../types/config'
 
 const packr = new Packr({ structuredClone: false, useRecords: false })
 
@@ -22,7 +22,8 @@ export function serializeStreamConfig(cfg: StreamConfig): Buffer {
 export function serializeConsumerConfig(cfg: ConsumerConfig): Buffer {
   const wire: Record<string, unknown> = { group: cfg.name }
   if (cfg.filter) wire['filter'] = cfg.filter
-  if (cfg.fanout)                              wire['fanout']                 = true
+  if (cfg.fanout)                              wire['deliver_mode']           = 'Fanout'
+  if (cfg.ackPolicy === AckPolicy.None)        wire['no_ack']                 = true
   if (cfg.deliverPolicy       !== undefined)   wire['deliver_policy']         = cfg.deliverPolicy
   if (cfg.startSeq            !== undefined)   wire['start_seq']              = cfg.startSeq
   if (cfg.startTime           !== undefined)   wire['start_time']             = cfg.startTime
