@@ -2,6 +2,8 @@
 
 Official TypeScript client for the [Arbitro](../arbitro) stateful flow broker.
 
+> Status: under active development. APIs, benchmarks, defaults, and reconnect behavior may still change.
+
 `arbitro-ts` is built for the features that make Arbitro different from a plain pub/sub broker:
 - durable streams and consumers
 - exact `stream` / `consumer` introspection and idempotent `upsert`
