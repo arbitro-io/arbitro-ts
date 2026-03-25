@@ -4,12 +4,16 @@
 //   tsx benches/throughput.ts [OPTIONS]
 //
 // Options:
-//   --mode    pub|ack|pubsub|lat|credit|replay-noack|replay-ack|batch|pub-mt
-//             |fire-and-forget|batch-publish|publish-and-deliver|fire-and-forget-mt
+//   --mode    pub|ack|pubsub|lat|credit|replay-noack|replay-ack|batch|pub-mt|perf
+//             |fire-and-forget|batch-publish|publish-and-deliver|fire-and-forget-mt|performance
 //             (default: pubsub)
 //   --msgs    N                            (default: 100_000)
 //   --size    N bytes                      (default: 128)
 //   --addr    host:port                    (default: 127.0.0.1:9898)
+//   --seconds N                            (default: 10)
+//   --rate    N msg/s                      (default: 10_000)
+//   --sample-ms N                          (default: 500)
+//   --container NAME                       (default: arbitro-broker)
 //
 // Examples:
 //   tsx benches/throughput.ts --mode pub --msgs 1000000
@@ -21,9 +25,11 @@
 //   tsx benches/throughput.ts --mode replay-ack --msgs 200000
 //   tsx benches/throughput.ts --mode batch --msgs 100000
 //   tsx benches/throughput.ts --mode pub-mt --msgs 100000
+//   tsx benches/throughput.ts --mode perf --seconds 10 --rate 20000
 
 import { AckPolicy, ArbitroClient, DeliverPolicy, JournalType } from '../src'
 import type { Subscription } from '../src'
+import { execFile } from 'node:child_process'
 
 // ── CLI ───────────────────────────────────────────────────────────────────
 
@@ -37,6 +43,10 @@ const MSGS = num('--msgs', 100_000)
 const SIZE = num('--size', 128)
 const ADDR = str('--addr', '127.0.0.1:9898')
 const MT_THREADS = num('--threads', 4)
+const SECONDS = num('--seconds', 10)
+const RATE = num('--rate', 10_000)
+const SAMPLE_MS = num('--sample-ms', 500)
+const CONTAINER = str('--container', 'arbitro-broker')
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -84,6 +94,62 @@ async function cleanup(admin: ArbitroClient, consumer: string, stream: string): 
   try { await admin.deleteConsumer(consumer) } catch {}
   try { await admin.deleteStream(stream) } catch {}
   await admin.close()
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function percentile(samples: number[], q: number): string {
+  if (samples.length === 0) return '—'
+  const idx = Math.min(samples.length - 1, Math.floor(samples.length * q))
+  return samples[idx]!.toFixed(1)
+}
+
+function avg(samples: number[]): number {
+  return samples.length === 0 ? 0 : samples.reduce((a, b) => a + b, 0) / samples.length
+}
+
+function parseMemToMiB(raw: string): number {
+  const match = raw.trim().match(/^([0-9.]+)\s*([KMG]i?B|B)$/i)
+  if (!match) return 0
+  const value = Number(match[1])
+  const unit = match[2].toUpperCase()
+  switch (unit) {
+    case 'B': return value / (1024 * 1024)
+    case 'KIB':
+    case 'KB': return value / 1024
+    case 'MIB':
+    case 'MB': return value
+    case 'GIB':
+    case 'GB': return value * 1024
+    default: return 0
+  }
+}
+
+type DockerSample = {
+  cpuPct: number
+  memMiB: number
+}
+
+function readDockerSample(container: string, onSample: (sample: DockerSample | null) => void): void {
+  execFile(
+    'docker',
+    ['stats', '--no-stream', '--format', '{{.CPUPerc}}|{{.MemUsage}}', container],
+    { encoding: 'utf8' },
+    (err, stdout) => {
+      if (err) return onSample(null)
+      const out = stdout.trim()
+      if (!out) return onSample(null)
+      const [cpuRaw, memRaw] = out.split('|')
+      if (!cpuRaw || !memRaw) return onSample(null)
+      const memUsed = memRaw.split('/')[0]?.trim() ?? ''
+      onSample({
+        cpuPct: Number(cpuRaw.replace('%', '').trim()) || 0,
+        memMiB: parseMemToMiB(memUsed),
+      })
+    },
+  )
 }
 
 // ── Mode: pub ─────────────────────────────────────────────────────────────
@@ -429,6 +495,137 @@ async function runReplay(ackMode: boolean): Promise<void> {
   await cleanup(admin, consumer, stream)
 }
 
+// ── Mode: perf / performance ───────────────────────────────────────────────
+// Sustained load at a target msg/s for N seconds, with subscriber active.
+
+async function runPerf(): Promise<void> {
+  header('perf')
+
+  const admin = await connect()
+  const subClient = await connect()
+  const pubClient = await connect()
+  const { stream, subject, consumer } = uniqueBenchNames('bench-perf')
+
+  await admin.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  await admin.createConsumer(stream, {
+    name: consumer,
+    filter: `${stream}.>`,
+    deliverPolicy: DeliverPolicy.New,
+    maxAckPending: Math.max(50_000, RATE * Math.max(1, SECONDS)),
+  })
+
+  const latenciesUs: number[] = []
+  const nodeCpuSamples: number[] = []
+  const nodeRssSamplesMiB: number[] = []
+  const nodeHeapSamplesMiB: number[] = []
+  const brokerCpuSamples: number[] = []
+  const brokerMemSamplesMiB: number[] = []
+  let received = 0
+  let firstRecv = 0n
+  let lastRecv = 0n
+
+  const subscription: Subscription = await subClient.subscribe(consumer, (msg) => {
+    const now = process.hrtime.bigint()
+    if (received === 0) firstRecv = now
+    lastRecv = now
+    received++
+    const data = msg.data()
+    if (data.length >= 8 && latenciesUs.length < 200_000) {
+      const sentNs = data.readBigUInt64LE(0)
+      latenciesUs.push(Number(now - sentNs) / 1_000)
+    }
+    msg.ack()
+  })
+
+  const payload = Buffer.alloc(Math.max(SIZE, 8), 0x42)
+  const start = process.hrtime.bigint()
+  const stopAt = start + BigInt(SECONDS) * 1_000_000_000n
+  let sent = 0
+  let sampleTimer: ReturnType<typeof setInterval> | undefined
+  let lastCpu = process.cpuUsage()
+  let lastCpuAt = process.hrtime.bigint()
+  let dockerSampleBusy = false
+
+  sampleTimer = setInterval(() => {
+    const now = process.hrtime.bigint()
+    const cpu = process.cpuUsage()
+    const wallUs = Number(now - lastCpuAt) / 1_000
+    if (wallUs > 0) {
+      const deltaCpuUs = (cpu.user - lastCpu.user) + (cpu.system - lastCpu.system)
+      nodeCpuSamples.push((deltaCpuUs / wallUs) * 100)
+    }
+    lastCpu = cpu
+    lastCpuAt = now
+
+    const mem = process.memoryUsage()
+    nodeRssSamplesMiB.push(mem.rss / 1024 / 1024)
+    nodeHeapSamplesMiB.push(mem.heapUsed / 1024 / 1024)
+
+    if (!dockerSampleBusy) {
+      dockerSampleBusy = true
+      readDockerSample(CONTAINER, (docker) => {
+        if (docker) {
+          brokerCpuSamples.push(docker.cpuPct)
+          brokerMemSamplesMiB.push(docker.memMiB)
+        }
+        dockerSampleBusy = false
+      })
+    }
+  }, SAMPLE_MS)
+
+  while (process.hrtime.bigint() < stopAt) {
+    const now = process.hrtime.bigint()
+    const elapsedSec = Number(now - start) / 1e9
+    const targetSent = Math.floor(elapsedSec * RATE)
+    while (sent < targetSent) {
+      payload.writeBigUInt64LE(process.hrtime.bigint(), 0)
+      pubClient.publish(subject, payload)
+      sent++
+    }
+    if (sent >= targetSent) await sleep(1)
+  }
+
+  await pubClient.publishAck(subject, Buffer.alloc(0))
+  const sendElapsed = Number(process.hrtime.bigint() - start) / 1e9
+  const graceDeadline = Date.now() + Math.max(5_000, Math.ceil((sent / Math.max(1, RATE)) * 1_000))
+  while (received < sent && Date.now() < graceDeadline) {
+    await sleep(25)
+  }
+  if (sampleTimer) clearInterval(sampleTimer)
+
+  latenciesUs.sort((a, b) => a - b)
+  const recvElapsed = firstRecv > 0n && lastRecv >= firstRecv
+    ? Number(lastRecv - firstRecv) / 1e9
+    : 0
+
+  console.log('  ┌── Sustained performance ─────────────────────────────────────┐')
+  console.log(`  │  target   : ${RATE.toLocaleString()} msg/s for ${SECONDS}s`)
+  console.log(`  │  sent     : ${sent.toLocaleString()}  in ${sendElapsed.toFixed(2)}s`)
+  console.log(`  │  send     : ${fmtRate(sent, sendElapsed)}`)
+  console.log(`  │  received : ${received.toLocaleString()}${received < sent ? `  (lag ${sent - received})` : ''}`)
+  if (recvElapsed > 0) console.log(`  │  consume  : ${fmtRate(received, recvElapsed)}`)
+  if (nodeCpuSamples.length > 0) {
+    console.log(`  │  node cpu : avg ${avg(nodeCpuSamples).toFixed(1)}%  max ${Math.max(...nodeCpuSamples).toFixed(1)}%`)
+    console.log(`  │  node rss : avg ${avg(nodeRssSamplesMiB).toFixed(1)} MiB  max ${Math.max(...nodeRssSamplesMiB).toFixed(1)} MiB`)
+    console.log(`  │  node heap: avg ${avg(nodeHeapSamplesMiB).toFixed(1)} MiB  max ${Math.max(...nodeHeapSamplesMiB).toFixed(1)} MiB`)
+  }
+  if (brokerCpuSamples.length > 0) {
+    console.log(`  │  broker cpu: avg ${avg(brokerCpuSamples).toFixed(1)}%  max ${Math.max(...brokerCpuSamples).toFixed(1)}%`)
+    console.log(`  │  broker mem: avg ${avg(brokerMemSamplesMiB).toFixed(1)} MiB  max ${Math.max(...brokerMemSamplesMiB).toFixed(1)} MiB`)
+  }
+  if (latenciesUs.length > 0) {
+    console.log(`  │  lat P50  : ${percentile(latenciesUs, 0.50).padStart(9)} µs`)
+    console.log(`  │  lat P90  : ${percentile(latenciesUs, 0.90).padStart(9)} µs`)
+    console.log(`  │  lat P99  : ${percentile(latenciesUs, 0.99).padStart(9)} µs`)
+    console.log(`  │  lat Max  : ${percentile(latenciesUs, 0.9999).padStart(9)} µs`)
+  }
+  console.log('  └─────────────────────────────────────────────────────────────┘')
+
+  subscription.close()
+  await Promise.all([subClient.close(), pubClient.close()])
+  await cleanup(admin, consumer, stream)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -446,6 +643,9 @@ async function main(): Promise<void> {
     case 'pub-mt':
     case 'fire-and-forget-mt':
       await runPubMt(); break
+    case 'perf':
+    case 'performance':
+      await runPerf(); break
     case 'replay-noack': await runReplay(false); break
     case 'replay-ack':   await runReplay(true); break
     default: console.error(`unknown mode: ${MODE}`); process.exit(1)
