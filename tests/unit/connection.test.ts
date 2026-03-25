@@ -3,22 +3,31 @@ import { JournalType } from '../../src'
 import { Connection } from '../../src/net/connection'
 import { pack } from '../../src/proto/codec'
 import { Action, Flags } from '../../src/proto/constants'
-import { createClient, waitUntil, BROKER_ADDR } from '../helpers/client'
+import { cleanupNamedResources, createClient, waitUntil, BROKER_ADDR, uniqueName } from '../helpers/client'
 import type { ArbitroClient } from '../../src'
 
 let admin: ArbitroClient
+let subscribeGroup = ''
+let routeGroup = ''
+const created: string[] = []
 
 beforeAll(async () => {
   admin = await createClient()
+  subscribeGroup = uniqueName('conn-subscribe-test')
+  routeGroup = uniqueName('conn-route-test')
+  created.push(subscribeGroup, routeGroup)
   // Pre-create groups used by connection-level tests.
   // PubSubscribe requires the consumer group to exist on the server.
   // conn-ack-test is created inside its own test with maxAckPending: 1 — not here.
-  for (const name of ['conn-subscribe-test', 'conn-route-test']) {
+  for (const name of [subscribeGroup, routeGroup]) {
     await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await admin.createConsumer(name, { name, filter: `${name}.>` })
   }
 })
-afterAll(async () => { await admin.close() })
+afterAll(async () => {
+  await cleanupNamedResources(admin, created)
+  await admin.close()
+})
 
 describe('Connection', () => {
   it('connects and closes cleanly', async () => {
@@ -28,14 +37,14 @@ describe('Connection', () => {
 
   it('sendExpectReply resolves with a valid subId from PubSubscribe', async () => {
     const conn  = await Connection.connect(BROKER_ADDR)
-    const frame = buildSubscribeFrame(conn.nextSeq(), 'conn-subscribe-test')
+    const frame = buildSubscribeFrame(conn.nextSeq(), subscribeGroup)
     const subId = await conn.sendExpectReply(frame)
     expect(subId > 0n).toBe(true)
     await conn.close()
   })
 
   it('delivery frames are routed to the registered handler', async () => {
-    const name = 'conn-route-test'
+    const name = routeGroup
 
     const conn  = await Connection.connect(BROKER_ADDR)
     const subId = await conn.sendExpectReply(buildSubscribeFrame(conn.nextSeq(), name))

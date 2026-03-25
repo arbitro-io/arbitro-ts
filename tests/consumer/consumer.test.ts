@@ -1,27 +1,27 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { ArbitroClient, JournalType, schema } from '../../src'
 import type { LazyMessage } from '../../src/topic'
-import { createClient, waitUntil } from '../helpers/client'
+import { cleanupNamedResources, createClient, uniqueName, waitUntil } from '../helpers/client'
 
 let client: ArbitroClient
-let counter = 0
-
-function uid(): string { return `c${++counter}` }
-
+const created: string[] = []
 const OrderCodec = schema({ id: 'number', status: 'string' })
 type Order = ReturnType<typeof OrderCodec.decode>
 
 beforeAll(async () => { client = await createClient() })
-afterAll(async () => { await client.close() })
+afterAll(async () => {
+  await cleanupNamedResources(client, created)
+  await client.close()
+})
 
 describe('Consumer delivery', () => {
   it('subscribe with typed codec delivers LazyMessage with correct field values', async () => {
-    const name = uid()
+    const name = uniqueName('c'); created.push(name)
     const stream = await client.stream(name).create({
       subjectFilter: `${name}.>`,
       journal: { type: JournalType.Memory },
     })
-    const consumer = await stream.consumer({ name })
+    const consumer = await stream.consumer({ name }).create()
     const received: LazyMessage<Order>[] = []
     const sub = await consumer.subscribe(OrderCodec, (msg: LazyMessage<Order>) => received.push(msg))
     await client.publishAck(`${name}.new`, OrderCodec.encode({ id: 42, status: 'pending' }))
@@ -33,12 +33,12 @@ describe('Consumer delivery', () => {
   })
 
   it('subscribe without codec delivers raw Buffer unchanged', async () => {
-    const name = uid()
+    const name = uniqueName('c'); created.push(name)
     const stream = await client.stream(name).create({
       subjectFilter: `${name}.>`,
       journal: { type: JournalType.Memory },
     })
-    const consumer = await stream.consumer({ name })
+    const consumer = await stream.consumer({ name }).create()
     const received: Buffer[] = []
     const sub = await consumer.subscribe((msg) => received.push(msg.data()))
 
@@ -50,12 +50,12 @@ describe('Consumer delivery', () => {
   })
 
   it('multiple messages are delivered in publish order', async () => {
-    const name = uid()
+    const name = uniqueName('c'); created.push(name)
     const stream = await client.stream(name).create({
       subjectFilter: `${name}.>`,
       journal: { type: JournalType.Memory },
     })
-    const consumer = await stream.consumer({ name })
+    const consumer = await stream.consumer({ name }).create()
     const received: string[] = []
     const sub = await consumer.subscribe((msg) => received.push(msg.data().toString()))
 
@@ -69,7 +69,7 @@ describe('Consumer delivery', () => {
   })
 
   it('ack unblocks delivery when maxAckPending is 1', async () => {
-    const name = uid()
+    const name = uniqueName('c'); created.push(name)
     await client.createStream(name, {
       subjectFilter: `${name}.>`,
       journal: { type: JournalType.Memory },
@@ -95,12 +95,12 @@ describe('Consumer delivery', () => {
   })
 
   it('fetch() returns messages in pull mode', async () => {
-    const name = uid()
+    const name = uniqueName('c'); created.push(name)
     const stream = await client.stream(name).create({
       subjectFilter: `${name}.>`,
       journal: { type: JournalType.Memory },
     })
-    const consumer = await stream.consumer({ name })
+    const consumer = await stream.consumer({ name }).create()
     const sub = await consumer.subscribe()
 
     await client.publishAck(`${name}.e`, Buffer.from('pull-a'))

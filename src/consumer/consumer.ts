@@ -1,5 +1,5 @@
 import type { ArbitroClient } from '../client/client'
-import type { ConsumerConfig, SubscribeOptions } from '../types/config'
+import type { ConsumerConfig, SubscribeOptions, ConsumerInfo } from '../types/config'
 import type { Subscription } from '../subscription/subscription'
 import type { Message } from '../message/message'
 import type { Encoding } from '../utils/codec'
@@ -23,8 +23,21 @@ export class Consumer {
     return this
   }
 
-  delete(): void {
-    this.client.deleteConsumer(this.name)
+  async upsert(): Promise<this> {
+    await this.client.upsertConsumer(this.streamName, this.config)
+    return this
+  }
+
+  async delete(): Promise<void> {
+    await this.client.deleteConsumer(this.name)
+  }
+
+  async exists(): Promise<boolean> {
+    return this.client.consumerExists(this.name)
+  }
+
+  async info(): Promise<ConsumerInfo | null> {
+    return this.client.getConsumerInfo(this.name)
   }
 
   // Raw subscribe — Message with manual ack/nack/decode.

@@ -1,18 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { ArbitroClient, JournalType } from '../../src'
-import { createClient, waitUntil } from '../helpers/client'
+import { cleanupNamedResources, createClient, uniqueName, waitUntil } from '../helpers/client'
 
 let client: ArbitroClient
-let counter = 0
-
+const created: string[] = []
 beforeAll(async () => { client = await createClient() })
-afterAll(async () => { await client.close() })
-
-function uid(): string { return `ct${++counter}` }
+afterAll(async () => {
+  await cleanupNamedResources(client, created)
+  await client.close()
+})
 
 describe('ArbitroClient', () => {
   it('publish (NoAck) delivers to subscriber', async () => {
-    const name = uid()
+    const name = uniqueName('ct'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
@@ -27,7 +27,7 @@ describe('ArbitroClient', () => {
   })
 
   it('prefix is prepended to the wire subject', async () => {
-    const name = 'app'
+    const name = uniqueName('app'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
@@ -44,7 +44,7 @@ describe('ArbitroClient', () => {
   })
 
   it('publishBatch — all messages reach subscriber in order', async () => {
-    const name = uid()
+    const name = uniqueName('ct'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
@@ -60,5 +60,45 @@ describe('ArbitroClient', () => {
     sub.close()
 
     expect(received).toEqual(['a', 'b', 'c'])
+  })
+
+  it('stream info / exists / upsert work', async () => {
+    const name = uniqueName('ct'); created.push(name)
+    const cfg = { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory as const } }
+    await client.createStream(name, cfg)
+
+    await expect(client.streamExists(name)).resolves.toBe(true)
+    await expect(client.getStreamInfo(name)).resolves.toMatchObject({
+      name,
+      config: { subjectFilter: `${name}.>` },
+    })
+    await expect(client.upsertStream(name, cfg)).resolves.toBeDefined()
+  })
+
+  it('consumer info / exists / upsert work', async () => {
+    const name = uniqueName('ct'); created.push(name)
+    await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
+    const cfg = { name, filter: `${name}.>` }
+    await client.createConsumer(name, cfg)
+
+    await expect(client.consumerExists(name)).resolves.toBe(true)
+    await expect(client.getConsumerInfo(name)).resolves.toMatchObject({
+      group: name,
+      stream: name,
+      config: { name, filter: `${name}.>` },
+    })
+    await expect(client.upsertConsumer(name, cfg)).resolves.toBeDefined()
+  })
+
+  it('deleteStream and deleteConsumer await server confirmation', async () => {
+    const name = uniqueName('ct'); created.push(name)
+    await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
+    await client.createConsumer(name, { name, filter: `${name}.>` })
+
+    await client.deleteConsumer(name)
+    await expect(client.consumerExists(name)).resolves.toBe(false)
+
+    await client.deleteStream(name, { deleteData: false })
+    await expect(client.streamExists(name)).resolves.toBe(false)
   })
 })

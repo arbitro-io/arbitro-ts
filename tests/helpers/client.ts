@@ -1,6 +1,7 @@
 import { ArbitroClient } from '../../src'
 
 export const BROKER_ADDR = '127.0.0.1:9898'
+let uniqueCounter = 0
 
 /** Returns a connected ArbitroClient pointing at the always-running arbitro instance. */
 export async function createClient(opts?: { prefix?: string }): Promise<ArbitroClient> {
@@ -11,6 +12,17 @@ export async function createClient(opts?: { prefix?: string }): Promise<ArbitroC
   })
   await client.connect()
   return client
+}
+
+export function uniqueName(prefix = 'ts'): string {
+  return `${prefix}-${process.pid}-${Date.now().toString(36)}-${++uniqueCounter}`
+}
+
+export async function cleanupNamedResources(client: ArbitroClient, names: string[]): Promise<void> {
+  for (const name of [...new Set(names)].reverse()) {
+    try { await client.deleteConsumer(name) } catch {}
+    try { await client.deleteStream(name) } catch {}
+  }
 }
 
 /** Polls `cond` every 20 ms until it returns true or `timeoutMs` elapses. */

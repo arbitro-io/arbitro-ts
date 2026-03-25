@@ -1,26 +1,24 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { ArbitroClient, JournalType } from '../src'
-import { createClient, waitUntil } from './helpers/client'
+import { cleanupNamedResources, createClient, uniqueName, waitUntil } from './helpers/client'
 
 // Three separate clients — one per role — same broker.
 let admin: ArbitroClient
 let pub:   ArbitroClient
 let sub:   ArbitroClient
-let counter = 0
-
-function uid(): string { return `e${++counter}` }
-
+const created: string[] = []
 beforeAll(async () => {
   ;[admin, pub, sub] = await Promise.all([createClient(), createClient(), createClient()])
 })
 
 afterAll(async () => {
+  await cleanupNamedResources(admin, created)
   await Promise.all([admin.close(), pub.close(), sub.close()])
 })
 
 describe('end-to-end', () => {
   it('subscriber on one client receives messages published by a separate client', async () => {
-    const name = uid()
+    const name = uniqueName('e'); created.push(name)
     await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await admin.createConsumer(name, { name, filter: `${name}.>` })
 
@@ -37,14 +35,14 @@ describe('end-to-end', () => {
   })
 
   it('publishAck resolves when broker confirms receipt', async () => {
-    const name = uid()
+    const name = uniqueName('e'); created.push(name)
     await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     // No subscriber needed — server sends RepOk once message is journaled.
     await expect(pub.publishAck(`${name}.e`, Buffer.from('data'))).resolves.toBeUndefined()
   })
 
   it('messages delivered in publish order across clients', async () => {
-    const name = uid()
+    const name = uniqueName('e'); created.push(name)
     await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await admin.createConsumer(name, { name, filter: `${name}.>` })
 
@@ -61,7 +59,7 @@ describe('end-to-end', () => {
   })
 
   it('admin creates stream and consumer before subscriber and publisher connect', async () => {
-    const name = uid()
+    const name = uniqueName('e'); created.push(name)
     // createStream/createConsumer block until the server confirms — no sync() needed.
     await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await admin.createConsumer(name, { name, filter: `${name}.>` })

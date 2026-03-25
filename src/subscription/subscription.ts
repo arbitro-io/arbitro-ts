@@ -18,15 +18,18 @@ export class Subscription {
   private closed      = false
 
   constructor(
-    readonly subId: bigint,
+    private subId: bigint,
     private readonly conn: Connection,
     private readonly fetchTimeoutMs: number,
-  ) {
-    conn.registerRoute(subId, (frame) => this.deliver(frame))
+  ) {}
+
+  // Called by Connection.sendSubscribe after a reconnect assigns a new subId.
+  updateSubId(newSubId: bigint): void {
+    this.subId = newSubId
   }
 
-  // Called by Connection when a delivery frame arrives for this sub.
-  private deliver(frame: Buffer): void {
+  // Called by the delivery handler registered in Connection.sendSubscribe.
+  deliver(frame: Buffer): void {
     if (this.closed) return
 
     const msgSeq = frame.readBigUInt64LE(OFF_SEQUENCE)
@@ -81,7 +84,7 @@ export class Subscription {
 
   close(): void {
     this.closed = true
-    this.conn.unregisterRoute(this.subId)
+    this.conn.cancelSubscription(this.subId)
     for (const p of this.fetchQueue) {
       clearTimeout(p.timer)
       p.resolve(p.buf)

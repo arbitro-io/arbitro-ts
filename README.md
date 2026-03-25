@@ -24,6 +24,11 @@ await client.connect()
 await client.createStream('orders', { subjectFilter: 'orders.>' })
 await client.createConsumer('orders', { name: 'workers', filter: 'orders.>' })
 
+await client.streamExists('orders')           // true
+await client.getStreamInfo('orders')          // StreamInfo | null
+await client.consumerExists('workers')        // true
+await client.getConsumerInfo('workers')       // ConsumerInfo | null
+
 const sub = await client.subscribe('workers', (msg) => {
   console.log(msg.data().toString())
   msg.ack()
@@ -39,6 +44,16 @@ const sub = await client
   .stream('orders')
   .consumer({ name: 'workers', filter: 'orders.>' })
   .subscribe((msg) => { msg.ack() })
+```
+
+## Upsert / delete
+
+```typescript
+await client.upsertStream('orders', { subjectFilter: 'orders.>' })
+await client.upsertConsumer('orders', { name: 'workers', filter: 'orders.>' })
+
+await client.deleteConsumer('workers')
+await client.deleteStream('orders', { deleteData: false }) // preserve journal file
 ```
 
 ## Schema codec

@@ -1,17 +1,19 @@
 import * as net from 'net'
 import * as tls from 'tls'
+import { Unpackr } from 'msgpackr'
 import { Framer } from '../proto/framer'
 import { pack } from '../proto/codec'
 import {
   Action, Flags,
   HEADER_SIZE, OFF_SEQUENCE, OFF_TIMESTAMP,
 } from '../proto/constants'
-import { ArbitroError } from '../types/error'
+import { ArbitroError, type BrokerError } from '../types/error'
 import type { TlsConfig, ReconnectConfig } from '../types/config'
 import { resolveLogger } from '../common/logger'
 import type { Logger } from '../common/logger'
 
 type DeliveryHandler = (frame: Buffer) => void
+const unpackr = new Unpackr({ structuredClone: false, useRecords: false })
 
 interface PendingMgmt {
   resolve: (seqOrSubId: bigint) => void
@@ -21,6 +23,12 @@ interface PendingMgmt {
 interface PendingRequest {
   resolve: (frame: Buffer) => void
   reject:  (err: Error) => void
+}
+
+interface ActiveSubscription {
+  group:   string
+  handler: DeliveryHandler
+  onRenew: ((newSubId: bigint) => void) | undefined
 }
 
 function parseAddr(addr: string): { host: string; port: number } {
@@ -37,7 +45,9 @@ export class Connection {
   private mgmtQ:          PendingMgmt[]                    = []
   private pendingRequests = new Map<bigint, PendingRequest>()
   private socket:         net.Socket
+  private closing         = false
   private readonly log:   Logger
+  private activeSubs      = new Map<bigint, ActiveSubscription>()
 
   private constructor(
     socket: net.Socket,
@@ -110,8 +120,13 @@ export class Connection {
         return
       }
       case Action.RepError: {
-        const msg = frame.subarray(HEADER_SIZE).toString('utf8')
-        this.mgmtQ.shift()?.reject(new ArbitroError(msg || 'server error', 'server'))
+        const payload = frame.subarray(HEADER_SIZE)
+        let broker: BrokerError | undefined
+        try {
+          broker = unpackr.unpack(payload) as BrokerError
+        } catch {}
+        const msg = broker?.message ?? (payload.toString('utf8') || 'server error')
+        this.mgmtQ.shift()?.reject(new ArbitroError(msg, 'server', broker?.name, broker?.details))
         return
       }
       case Action.RepReply: {
@@ -142,7 +157,63 @@ export class Connection {
     }
   }
 
-  // ── Routes ────────────────────────────────────────────────────────────────
+  // ── Subscriptions ─────────────────────────────────────────────────────────
+
+  // Send PubSubscribe, register the delivery route, and track for reconnect.
+  async sendSubscribe(
+    group:    string,
+    handler:  DeliveryHandler,
+    onRenew?: (newSubId: bigint) => void,
+  ): Promise<bigint> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new ArbitroError('subscribe timeout: no RepOk from server', 'timeout')),
+        5_000,
+      )
+      this.mgmtQ.push({
+        resolve: (subId) => {
+          clearTimeout(timer)
+          // Install the delivery route before yielding back to the caller.
+          // This closes the race where the server sends RepOk + first delivery
+          // in the same TCP burst during replay.
+          this.routes.set(subId, handler)
+          this.activeSubs.set(subId, { group, handler, onRenew })
+          resolve(subId)
+        },
+        reject: (err) => {
+          clearTimeout(timer)
+          reject(err)
+        },
+      })
+      this.socket.write(pack({
+        action:  Action.PubSubscribe,
+        flags:   Flags.None,
+        seq:     this.nextSeq(),
+        subject: group,
+        data:    Buffer.alloc(0),
+      }))
+    })
+  }
+
+  // Remove the delivery route and cancel reconnect tracking.
+  cancelSubscription(subId: bigint): void {
+    this.routes.delete(subId)
+    this.activeSubs.delete(subId)
+  }
+
+  // Re-establish all active subscriptions after a reconnect.
+  private resubscribeAll(): void {
+    const subs = [...this.activeSubs.values()]
+    this.activeSubs.clear()
+    this.routes.clear()
+    for (const { group, handler, onRenew } of subs) {
+      this.sendSubscribe(group, handler, onRenew)
+        .then((newId) => { if (onRenew) onRenew(newId) })
+        .catch(() => {})
+    }
+  }
+
+  // ── Routes (internal use) ─────────────────────────────────────────────────
 
   registerRoute(subId: bigint, handler: DeliveryHandler): void {
     this.routes.set(subId, handler)
@@ -188,6 +259,11 @@ export class Connection {
     })
   }
 
+  async requestMsgpack<T>(seq: bigint, frame: Buffer, timeoutMs: number): Promise<T> {
+    const reply = await this.sendRequest(seq, frame, timeoutMs)
+    return unpackr.unpack(reply.subarray(HEADER_SIZE)) as T
+  }
+
   sendAck(subId: bigint, msgSeq: bigint): void {
     this.socket.write(pack({
       action:    Action.RepAck,
@@ -221,6 +297,7 @@ export class Connection {
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   close(): Promise<void> {
+    this.closing = true
     return new Promise((resolve) => this.socket.end(resolve))
   }
 
@@ -235,7 +312,7 @@ export class Connection {
     this.log.debug('arbitro connection closed')
     this.drain(new ArbitroError('connection closed', 'closed'))
     const cfg = this.reconnectCfg
-    if (cfg && cfg.enabled !== false && this.reconnectAddr) this.tryReconnect(0)
+    if (!this.closing && cfg && cfg.enabled !== false && this.reconnectAddr) this.tryReconnect(0)
   }
 
   private tryReconnect(attempt: number): void {
@@ -258,6 +335,7 @@ export class Connection {
         this.framer = new Framer()
         this.socket = socket
         this.attachSocket(socket)
+        this.resubscribeAll()
       })
       socket.once('error', () => this.tryReconnect(attempt + 1))
     }, delay)

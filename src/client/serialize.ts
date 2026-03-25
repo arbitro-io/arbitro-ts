@@ -1,5 +1,7 @@
 import { Packr } from 'msgpackr'
-import { AckPolicy, JournalType, type StreamConfig, type ConsumerConfig } from '../types/config'
+import {
+  AckPolicy, JournalType, type StreamConfig, type ConsumerConfig, type DeleteStreamOpts,
+} from '../types/config'
 
 const packr = new Packr({ structuredClone: false, useRecords: false })
 
@@ -32,5 +34,12 @@ export function serializeConsumerConfig(cfg: ConsumerConfig): Buffer {
   if (cfg.maxDeliver          !== undefined)   wire['max_deliver']            = cfg.maxDeliver
   if (cfg.removeUnusedAfterMs !== undefined)   wire['remove_unused_after_ms'] = cfg.removeUnusedAfterMs
   if (cfg.creditRules?.length)                 wire['credit_rules']           = cfg.creditRules
+  return Buffer.from(packr.pack(wire))
+}
+
+export function serializeDeleteStreamOpts(opts?: DeleteStreamOpts): Buffer {
+  if (!opts) return Buffer.alloc(0)
+  const wire: Record<string, unknown> = {}
+  if (opts.deleteData !== undefined) wire['delete_data'] = opts.deleteData
   return Buffer.from(packr.pack(wire))
 }

@@ -1,18 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { ArbitroClient, JournalType } from '../../src'
-import { createClient, waitUntil } from '../helpers/client'
+import { cleanupNamedResources, createClient, uniqueName, waitUntil } from '../helpers/client'
 
 let client: ArbitroClient
-let counter = 0
-
-function uid(): string { return `p${++counter}` }
-
+const created: string[] = []
 beforeAll(async () => { client = await createClient() })
-afterAll(async () => { await client.close() })
+afterAll(async () => {
+  await cleanupNamedResources(client, created)
+  await client.close()
+})
 
 describe('publish/subscribe', () => {
   it('fire-and-forget publish reaches subscriber', async () => {
-    const name = uid()
+    const name = uniqueName('p'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
@@ -27,7 +27,7 @@ describe('publish/subscribe', () => {
   })
 
   it('publishAck resolves after server confirms receipt', async () => {
-    const name = uid()
+    const name = uniqueName('p'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
     await expect(
@@ -36,7 +36,7 @@ describe('publish/subscribe', () => {
   })
 
   it('publishBatch — all messages reach subscriber', async () => {
-    const name = uid()
+    const name = uniqueName('p'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
@@ -55,7 +55,7 @@ describe('publish/subscribe', () => {
   })
 
   it('fanout consumer — two subscribers each receive every message', async () => {
-    const name = uid()
+    const name = uniqueName('p'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>`, fanout: true })
 

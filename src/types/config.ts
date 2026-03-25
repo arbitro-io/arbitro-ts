@@ -31,7 +31,7 @@ export type JournalConfig =
 
 export interface CreditRule {
   pattern: string
-  max:     number
+  limit:   number
 }
 
 export interface StreamConfig {
@@ -40,6 +40,16 @@ export interface StreamConfig {
   maxMsgs?:       number
   maxBytes?:      number
   maxAgeMs?:      number
+}
+
+export interface DeleteStreamOpts {
+  deleteData?: boolean
+}
+
+export interface StreamInfo {
+  name: string
+  config: StreamConfig
+  lastSeq: number
 }
 
 export interface ConsumerConfig {
@@ -56,6 +66,12 @@ export interface ConsumerConfig {
   maxDeliver?:          number
   removeUnusedAfterMs?: number
   creditRules?:         CreditRule[]
+}
+
+export interface ConsumerInfo {
+  group: string
+  stream: string
+  config: ConsumerConfig
 }
 
 export interface SubscribeOptions {

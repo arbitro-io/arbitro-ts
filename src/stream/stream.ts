@@ -1,11 +1,11 @@
 import type { ArbitroClient } from '../client/client'
-import type { StreamConfig, ConsumerConfig } from '../types/config'
+import type { StreamConfig, ConsumerConfig, DeleteStreamOpts, StreamInfo } from '../types/config'
 import type { Encoding } from '../utils/codec'
-import type { Consumer } from '../consumer/consumer'
+import { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
 
 // Stream — context object carrying name + config.
-// No network calls at construction — only at .create(), .delete(), and .consumer().
+// No network calls at construction — only at .create(), .upsert(), and .delete().
 export class Stream {
   private _config: StreamConfig | undefined
 
@@ -26,20 +26,34 @@ export class Stream {
     return this
   }
 
-  delete(): void {
-    this.client.deleteStream(this.name)
+  async upsert(config: StreamConfig): Promise<this> {
+    this._config = config
+    await this.client.upsertStream(this.name, config)
+    return this
   }
 
-  // Creates the consumer on the server with defaults derived from this stream.
+  async delete(opts?: DeleteStreamOpts): Promise<void> {
+    await this.client.deleteStream(this.name, opts)
+  }
+
+  async exists(): Promise<boolean> {
+    return this.client.streamExists(this.name)
+  }
+
+  async info(): Promise<StreamInfo | null> {
+    return this.client.getStreamInfo(this.name)
+  }
+
+  // Pure construction of a Consumer context with defaults derived from this stream.
   // name defaults to stream name, filter defaults to "${name}.>".
-  // Any field can be overridden.
-  async consumer(overrides?: Partial<ConsumerConfig>): Promise<Consumer> {
+  // Call consumer.create() / consumer.upsert() for server-side registration.
+  consumer(overrides?: Partial<ConsumerConfig>): Consumer {
     const config: ConsumerConfig = {
       ...overrides,
       name:   overrides?.name   ?? this.name,
       filter: overrides?.filter ?? `${this.name}.>`,
     }
-    return this.client.createConsumer(this.name, config)
+    return new Consumer(this.client, this.name, config)
   }
 
   // Returns a Topic<T> bound to subject + codec — no network call.

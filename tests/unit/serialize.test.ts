@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { Unpackr } from 'msgpackr'
-import { serializeStreamConfig, serializeConsumerConfig } from '../../src/client/serialize'
+import { serializeStreamConfig, serializeConsumerConfig, serializeDeleteStreamOpts } from '../../src/client/serialize'
 import { DeliverPolicy, JournalType } from '../../src/types/config'
 
 const unpackr = new Unpackr({ useRecords: false })
@@ -76,7 +76,7 @@ describe('serializeConsumerConfig', () => {
   })
 
   it('encodes credit_rules', () => {
-    const rules = [{ pattern: 'orders.us.>', max: 100 }, { pattern: 'orders.eu.>', max: 50 }]
+    const rules = [{ pattern: 'orders.us.>', limit: 100 }, { pattern: 'orders.eu.>', limit: 50 }]
     const wire  = unpack(serializeConsumerConfig({ name: 'w', filter: 'x', creditRules: rules }))
     expect(Array.isArray(wire['credit_rules'])).toBe(true)
     expect((wire['credit_rules'] as unknown[]).length).toBe(2)
@@ -87,5 +87,16 @@ describe('serializeConsumerConfig', () => {
     expect(wire['deliver_policy']).toBeUndefined()
     expect(wire['max_ack_pending']).toBeUndefined()
     expect(wire['credit_rules']).toBeUndefined()
+  })
+})
+
+describe('serializeDeleteStreamOpts', () => {
+  it('encodes delete_data when set', () => {
+    const wire = unpack(serializeDeleteStreamOpts({ deleteData: false }))
+    expect(wire['delete_data']).toBe(false)
+  })
+
+  it('returns empty payload when opts are omitted', () => {
+    expect(serializeDeleteStreamOpts()).toEqual(Buffer.alloc(0))
   })
 })

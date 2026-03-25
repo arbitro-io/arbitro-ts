@@ -15,10 +15,13 @@ export type { Logger, LogFn } from "./common/logger";
 export type {
   ClientConfig,
   StreamConfig,
+  StreamInfo,
   ConsumerConfig,
+  ConsumerInfo,
   JournalConfig,
   FlushConfig,
   CreditRule,
+  DeleteStreamOpts,
   SubscribeOptions,
   ReconnectConfig,
   TlsConfig,
