@@ -5,7 +5,6 @@
 //
 // Options:
 //   --mode    pub|ack|pubsub|lat|credit|replay-noack|replay-ack|batch|pub-mt|perf
-//             |fire-and-forget|batch-publish|publish-and-deliver|fire-and-forget-mt|performance
 //             (default: pubsub)
 //   --msgs    N                            (default: 100_000)
 //   --size    N bytes                      (default: 128)
@@ -14,21 +13,9 @@
 //   --rate    N msg/s                      (default: 10_000)
 //   --sample-ms N                          (default: 500)
 //   --container NAME                       (default: arbitro-broker)
-//
-// Examples:
-//   tsx benches/throughput.ts --mode pub --msgs 1000000
-//   tsx benches/throughput.ts --mode ack --msgs 10000
-//   tsx benches/throughput.ts --mode pubsub --msgs 200000
-//   tsx benches/throughput.ts --mode lat --msgs 5000
-//   tsx benches/throughput.ts --mode credit --msgs 10000
-//   tsx benches/throughput.ts --mode replay-noack --msgs 200000
-//   tsx benches/throughput.ts --mode replay-ack --msgs 200000
-//   tsx benches/throughput.ts --mode batch --msgs 100000
-//   tsx benches/throughput.ts --mode pub-mt --msgs 100000
-//   tsx benches/throughput.ts --mode perf --seconds 10 --rate 20000
 
 import { AckPolicy, ArbitroClient, DeliverPolicy, JournalType } from '../src'
-import type { Subscription } from '../src'
+import type { Subscription, Stream } from '../src'
 import { execFile } from 'node:child_process'
 
 // ── CLI ───────────────────────────────────────────────────────────────────
@@ -38,7 +25,7 @@ const str   = (flag: string, def: string) => { const i = argv.indexOf(flag); ret
 const num   = (flag: string, def: number) => { const v = str(flag, ''); return v ? parseInt(v, 10) : def }
 
 const MODE    = str('--mode', 'pubsub')
-const CREDIT  = num('--credit', 0)   // 0 = no credit rule; >0 = max in-flight per pattern
+const CREDIT  = num('--credit', 0)
 const MSGS = num('--msgs', 100_000)
 const SIZE = num('--size', 128)
 const ADDR = str('--addr', '127.0.0.1:9898')
@@ -90,6 +77,10 @@ function uniqueBenchNames(prefix: string): { stream: string, subject: string, co
   }
 }
 
+async function createBenchStream(client: ArbitroClient, name: string): Promise<Stream> {
+  return client.stream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } }).create()
+}
+
 async function cleanup(admin: ArbitroClient, consumer: string, stream: string): Promise<void> {
   try { await admin.deleteConsumer(consumer) } catch {}
   try { await admin.deleteStream(stream) } catch {}
@@ -117,20 +108,14 @@ function parseMemToMiB(raw: string): number {
   const unit = match[2].toUpperCase()
   switch (unit) {
     case 'B': return value / (1024 * 1024)
-    case 'KIB':
-    case 'KB': return value / 1024
-    case 'MIB':
-    case 'MB': return value
-    case 'GIB':
-    case 'GB': return value * 1024
+    case 'KIB': case 'KB': return value / 1024
+    case 'MIB': case 'MB': return value
+    case 'GIB': case 'GB': return value * 1024
     default: return 0
   }
 }
 
-type DockerSample = {
-  cpuPct: number
-  memMiB: number
-}
+type DockerSample = { cpuPct: number; memMiB: number }
 
 function readDockerSample(container: string, onSample: (sample: DockerSample | null) => void): void {
   execFile(
@@ -158,15 +143,13 @@ async function runPub(): Promise<void> {
   header('pub')
   const client = await connect()
   const { stream, subject, consumer } = uniqueBenchNames('bench-pub')
-  await client.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  const s = await createBenchStream(client, stream)
 
   const payload = Buffer.alloc(SIZE, 0x42)
   const t0      = process.hrtime.bigint()
 
-  for (let i = 0; i < MSGS; i++) client.publish(subject, payload)
-  // Fence: publishAck uses SysKeepalive — server echoes RepOk only after
-  // processing everything before it on this connection. Makes the timer honest.
-  await client.publishAck(subject, Buffer.alloc(0))
+  for (let i = 0; i < MSGS; i++) s.publish(subject, payload)
+  await s.publishAck(subject, Buffer.alloc(0))
 
   const elapsed = Number(process.hrtime.bigint() - t0) / 1e9
   console.log('  ┌── Pub results ───────────────────────────────────────────────┐')
@@ -182,14 +165,12 @@ async function runPub(): Promise<void> {
 async function runPubSub(): Promise<void> {
   header('pubsub')
 
-  // Two separate connections: sub receives delivery, pub sends messages.
-  // Mixing pub + delivery on one TCP connection creates backpressure — separate them.
   const admin = await connect()
   const subClient = await connect()
   const pubClient = await connect()
   const { stream, subject, consumer: consumerGroup } = uniqueBenchNames('bench-pubsub')
 
-  await admin.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  await createBenchStream(admin, stream)
   await admin.createConsumer(stream, { name: consumerGroup, filter: `${stream}.>`, deliverPolicy: DeliverPolicy.New })
   const streamCtx = subClient.stream(stream)
   const consumer = streamCtx.consumer({ name: consumerGroup, filter: `${stream}.>`, deliverPolicy: DeliverPolicy.New })
@@ -205,16 +186,14 @@ async function runPubSub(): Promise<void> {
     if (received >= MSGS) subEnd = process.hrtime.bigint()
   })
 
-  const payload  = Buffer.alloc(SIZE, 0x42)
-  const pubStart = process.hrtime.bigint()
-  for (let i = 0; i < MSGS; i++) pubClient.publish(subject, payload)
+  const pubStream = pubClient.stream(stream)
+  const payload   = Buffer.alloc(SIZE, 0x42)
+  const pubStart  = process.hrtime.bigint()
+  for (let i = 0; i < MSGS; i++) pubStream.publish(subject, payload)
   const pubElapsed = Number(process.hrtime.bigint() - pubStart) / 1e9
 
-  // Wait for all messages (max 60s)
   const deadline = Date.now() + 60_000
-  while (received < MSGS && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50))
-  }
+  while (received < MSGS && Date.now() < deadline) await sleep(50)
 
   const subElapsed = Number(subEnd - subStart) / 1e9
 
@@ -234,9 +213,6 @@ async function runPubSub(): Promise<void> {
 }
 
 // ── Mode: ack ─────────────────────────────────────────────────────────────
-// Measures server-confirmed publish throughput.
-// Uses publishAck() as a fence every ACK_BATCH messages so all frames are
-// durably journalled before the timer stops.
 
 const ACK_BATCH = 256
 
@@ -244,18 +220,16 @@ async function runAck(): Promise<void> {
   header('ack')
   const client = await connect()
   const { stream, subject, consumer } = uniqueBenchNames('bench-ack')
-  await client.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  const s = await createBenchStream(client, stream)
 
   const payload = Buffer.alloc(SIZE, 0x42)
   const t0      = process.hrtime.bigint()
 
   for (let i = 0; i < MSGS; i++) {
-    client.publish(subject, payload)
-    // Fence every ACK_BATCH messages — server echoes RepOk only after
-    // processing everything queued before it on this connection.
-    if ((i + 1) % ACK_BATCH === 0) await client.publishAck(subject, Buffer.alloc(0))
+    s.publish(subject, payload)
+    if ((i + 1) % ACK_BATCH === 0) await s.publishAck(subject, Buffer.alloc(0))
   }
-  await client.publishAck(subject, Buffer.alloc(0))
+  await s.publishAck(subject, Buffer.alloc(0))
 
   const elapsed = Number(process.hrtime.bigint() - t0) / 1e9
   console.log('  ┌── Ack results ───────────────────────────────────────────────┐')
@@ -273,7 +247,7 @@ async function runBatch(): Promise<void> {
   header('batch')
   const client = await connect()
   const { stream, subject, consumer } = uniqueBenchNames('bench-batch')
-  await client.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  const s = await createBenchStream(client, stream)
 
   const payload = Buffer.alloc(SIZE, 0x42)
   const batchSizes = [8, 32, 128]
@@ -283,8 +257,8 @@ async function runBatch(): Promise<void> {
     const iterations = Math.max(1, Math.floor(MSGS / batchSize))
     const messages: [string, Buffer][] = Array.from({ length: batchSize }, () => [subject, payload])
     const t0 = process.hrtime.bigint()
-    for (let i = 0; i < iterations; i++) client.publishBatch(messages)
-    await client.publishAck(subject, Buffer.alloc(0))
+    for (let i = 0; i < iterations; i++) s.publishBatch(messages)
+    await s.publishAck(subject, Buffer.alloc(0))
     const sent = iterations * batchSize
     const elapsed = Number(process.hrtime.bigint() - t0) / 1e9
     console.log(`  │  batch=${batchSize.toString().padEnd(3)} sent=${sent.toString().padStart(7)}  rate=${fmtRate(sent, elapsed)}`)
@@ -300,19 +274,19 @@ async function runPubMt(): Promise<void> {
   header('pub-mt')
   const admin = await connect()
   const { stream, subject, consumer } = uniqueBenchNames('bench-pub-mt')
-  await admin.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  await createBenchStream(admin, stream)
 
-  const threadCounts = [1, 2, 4]
   const payload = Buffer.alloc(SIZE, 0x42)
 
   console.log('  ┌── Multi-thread publish results ─────────────────────────────┐')
-  for (const n of threadCounts) {
+  for (const n of [1, 2, 4]) {
     const clients = await Promise.all(Array.from({ length: n }, () => connect()))
     const perClient = Math.max(1, Math.floor(MSGS / n))
     const t0 = process.hrtime.bigint()
     await Promise.all(clients.map(async (client) => {
-      for (let i = 0; i < perClient; i++) client.publish(subject, payload)
-      await client.publishAck(subject, Buffer.alloc(0))
+      const s = client.stream(stream)
+      for (let i = 0; i < perClient; i++) s.publish(subject, payload)
+      await s.publishAck(subject, Buffer.alloc(0))
       await client.close()
     }))
     const sent = perClient * n
@@ -325,26 +299,14 @@ async function runPubMt(): Promise<void> {
 }
 
 // ── Mode: credit ───────────────────────────────────────────────────────────
-// Validates that credit_rules throttle per-subject delivery.
-// Runs three scenarios back-to-back on the same broker:
-//   1. no credit rule  — baseline delivery rate
-//   2. credit=500      — large limit, minimal overhead
-//   3. credit=5        — tight limit, visible back-pressure
 
-async function runCreditScenario(
-  label: string,
-  maxCredit: number | null,
-): Promise<void> {
-  // Each scenario uses a unique tag for stream, consumer, AND subject to avoid
-  // the broker's subject-routing cache being stale across scenarios.
+async function runCreditScenario(label: string, maxCredit: number | null): Promise<void> {
   const tag      = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
   const stream   = `credit-${tag}`
   const consumer = `credit-workers-${tag}`
-  // Unique subject per scenario — avoids routing cache collision between runs.
-  // Pattern '*.msg' still matches '${tag}.msg' (single-token wildcard).
   const subject  = `${tag}.msg`
 
-  const admin  = await connect()
+  const admin = await connect()
   await admin.createStream(stream, { subjectFilter: subject, journal: { type: JournalType.Memory } })
 
   const consumerCfg = maxCredit !== null
@@ -359,15 +321,14 @@ async function runCreditScenario(
   const sub = await subClient.subscribe(consumer, (msg) => { msg.ack(); received++ })
 
   const pubClient = await connect()
+  const pubStream = pubClient.stream(stream)
   const payload   = Buffer.alloc(SIZE, 0x42)
   const t0        = process.hrtime.bigint()
 
-  for (let i = 0; i < MSGS; i++) pubClient.publish(subject, payload)
+  for (let i = 0; i < MSGS; i++) pubStream.publish(subject, payload)
 
   const deadline = Date.now() + 30_000
-  while (received < MSGS && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50))
-  }
+  while (received < MSGS && Date.now() < deadline) await sleep(50)
 
   const elapsed    = Number(process.hrtime.bigint() - t0) / 1e9
   const creditStr  = maxCredit !== null ? `limit=${maxCredit}` : 'none    '
@@ -387,8 +348,6 @@ async function runCredit(): Promise<void> {
   await runCreditScenario('limit=500', 500)
   await runCreditScenario('limit=5  ', 5)
   console.log()
-  console.log('  HOL isolation: run --mode pubsub to verify fast subject is')
-  console.log('  unaffected when slow subject exhausts its credit slot.')
 }
 
 // ── Mode: lat ─────────────────────────────────────────────────────────────
@@ -401,10 +360,9 @@ async function runLat(): Promise<void> {
   const pubClient = await connect()
   const { stream, subject, consumer: consumerGroup } = uniqueBenchNames('bench-lat')
 
-  await admin.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  await createBenchStream(admin, stream)
   await admin.createConsumer(stream, { name: consumerGroup, filter: `${stream}.>`, maxAckPending: 1, deliverPolicy: DeliverPolicy.New })
-  const streamCtx = subClient.stream(stream)
-  const consumer = streamCtx.consumer({ name: consumerGroup, filter: `${stream}.>`, maxAckPending: 1, deliverPolicy: DeliverPolicy.New })
+  const consumer = subClient.stream(stream).consumer({ name: consumerGroup, filter: `${stream}.>`, maxAckPending: 1, deliverPolicy: DeliverPolicy.New })
 
   const samples: number[] = []
   let resolve: (() => void) | null = null
@@ -414,11 +372,12 @@ async function runLat(): Promise<void> {
     resolve?.()
   })
 
-  const payload = Buffer.alloc(SIZE, 0x42)
+  const pubStream = pubClient.stream(stream)
+  const payload   = Buffer.alloc(SIZE, 0x42)
   for (let i = 0; i < MSGS; i++) {
     const t0 = process.hrtime.bigint()
-    await new Promise<void>((res) => { resolve = res; pubClient.publish(subject, payload) })
-    samples.push(Number(process.hrtime.bigint() - t0) / 1_000)  // µs
+    await new Promise<void>((res) => { resolve = res; pubStream.publish(subject, payload) })
+    samples.push(Number(process.hrtime.bigint() - t0) / 1_000)
   }
 
   samples.sort((a, b) => a - b)
@@ -438,7 +397,6 @@ async function runLat(): Promise<void> {
 }
 
 // ── Mode: replay-noack / replay-ack ───────────────────────────────────────
-// Preload the stream first, then subscribe and measure pure replay/drain throughput.
 
 async function runReplay(ackMode: boolean): Promise<void> {
   header(ackMode ? 'replay-ack' : 'replay-noack')
@@ -448,7 +406,7 @@ async function runReplay(ackMode: boolean): Promise<void> {
   const subClient = await connect()
   const { stream, subject, consumer } = uniqueBenchNames(ackMode ? 'bench-replay-ack' : 'bench-replay-noack')
 
-  await admin.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  await createBenchStream(admin, stream)
   await admin.createConsumer(stream, {
     name: consumer,
     filter: `${stream}.>`,
@@ -457,10 +415,11 @@ async function runReplay(ackMode: boolean): Promise<void> {
     maxAckPending: ackMode ? Math.max(50_000, Math.floor(MSGS / 5)) : undefined,
   })
 
+  const pubStream = pubClient.stream(stream)
   const payload = Buffer.alloc(SIZE, 0x42)
   const preloadStart = process.hrtime.bigint()
-  for (let i = 0; i < MSGS; i++) pubClient.publish(subject, payload)
-  await pubClient.publishAck(subject, Buffer.alloc(0))
+  for (let i = 0; i < MSGS; i++) pubStream.publish(subject, payload)
+  await pubStream.publishAck(subject, Buffer.alloc(0))
   const preloadElapsed = Number(process.hrtime.bigint() - preloadStart) / 1e9
 
   let received = 0
@@ -476,9 +435,7 @@ async function runReplay(ackMode: boolean): Promise<void> {
   })
 
   const deadline = Date.now() + 60_000
-  while (received < MSGS && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 50))
-  }
+  while (received < MSGS && Date.now() < deadline) await sleep(50)
 
   const replayElapsed = subEnd > 0n ? Number(subEnd - subStart) / 1e9 : 0
 
@@ -496,7 +453,6 @@ async function runReplay(ackMode: boolean): Promise<void> {
 }
 
 // ── Mode: perf / performance ───────────────────────────────────────────────
-// Sustained load at a target msg/s for N seconds, with subscriber active.
 
 async function runPerf(): Promise<void> {
   header('perf')
@@ -506,7 +462,7 @@ async function runPerf(): Promise<void> {
   const pubClient = await connect()
   const { stream, subject, consumer } = uniqueBenchNames('bench-perf')
 
-  await admin.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Memory } })
+  await createBenchStream(admin, stream)
   await admin.createConsumer(stream, {
     name: consumer,
     filter: `${stream}.>`,
@@ -537,6 +493,7 @@ async function runPerf(): Promise<void> {
     msg.ack()
   })
 
+  const pubStream = pubClient.stream(stream)
   const payload = Buffer.alloc(Math.max(SIZE, 8), 0x42)
   const start = process.hrtime.bigint()
   const stopAt = start + BigInt(SECONDS) * 1_000_000_000n
@@ -579,18 +536,16 @@ async function runPerf(): Promise<void> {
     const targetSent = Math.floor(elapsedSec * RATE)
     while (sent < targetSent) {
       payload.writeBigUInt64LE(process.hrtime.bigint(), 0)
-      pubClient.publish(subject, payload)
+      pubStream.publish(subject, payload)
       sent++
     }
     if (sent >= targetSent) await sleep(1)
   }
 
-  await pubClient.publishAck(subject, Buffer.alloc(0))
+  await pubStream.publishAck(subject, Buffer.alloc(0))
   const sendElapsed = Number(process.hrtime.bigint() - start) / 1e9
   const graceDeadline = Date.now() + Math.max(5_000, Math.ceil((sent / Math.max(1, RATE)) * 1_000))
-  while (received < sent && Date.now() < graceDeadline) {
-    await sleep(25)
-  }
+  while (received < sent && Date.now() < graceDeadline) await sleep(25)
   if (sampleTimer) clearInterval(sampleTimer)
 
   latenciesUs.sort((a, b) => a - b)
@@ -630,21 +585,18 @@ async function runPerf(): Promise<void> {
 
 async function main(): Promise<void> {
   switch (MODE) {
-    case 'pub':    await runPub();    break
-    case 'fire-and-forget': await runPub(); break
+    case 'pub': case 'fire-and-forget':
+      await runPub(); break
     case 'ack':    await runAck();    break
-    case 'pubsub': await runPubSub(); break
-    case 'publish-and-deliver': await runLat(); break
+    case 'pubsub': case 'publish-and-deliver':
+      await runPubSub(); break
     case 'lat':    await runLat();    break
     case 'credit': await runCredit(); break
-    case 'batch':
-    case 'batch-publish':
+    case 'batch': case 'batch-publish':
       await runBatch(); break
-    case 'pub-mt':
-    case 'fire-and-forget-mt':
+    case 'pub-mt': case 'fire-and-forget-mt':
       await runPubMt(); break
-    case 'perf':
-    case 'performance':
+    case 'perf': case 'performance':
       await runPerf(); break
     case 'replay-noack': await runReplay(false); break
     case 'replay-ack':   await runReplay(true); break

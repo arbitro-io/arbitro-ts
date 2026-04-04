@@ -10,6 +10,7 @@ import {
 import { Stream } from '../stream/stream'
 import { Consumer } from '../consumer/consumer'
 import { serializeStreamConfig, serializeConsumerConfig, serializeDeleteStreamOpts } from './serialize'
+import { streamPublish, streamPublishAck, streamPublishBatch, streamRequest } from '../stream/publish'
 
 type MsgCallback = (msg: import('../message/message').Message) => void
 
@@ -46,6 +47,28 @@ export class ArbitroClient {
 
   /** Default timeout from config. */
   get timeout(): number { return this.cfg.timeout }
+
+  // ── Publish (stream name required) ────────────────────────────────────────
+
+  /** Fire-and-forget publish. Stream name is mandatory. */
+  publish(streamName: string, subject: string, data: Buffer): void {
+    streamPublish(this.conn, streamName, subject, data)
+  }
+
+  /** Publish and wait for server confirmation. */
+  async publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
+    await streamPublishAck(this.conn, streamName, subject, data)
+  }
+
+  /** Batch fire-and-forget — single write syscall. */
+  publishBatch(streamName: string, messages: [subject: string, data: Buffer][]): void {
+    streamPublishBatch(this.conn, streamName, messages)
+  }
+
+  /** Request-reply. Waits for subscriber reply or timeout. */
+  async request(subject: string, data: Buffer, timeoutMs = this.cfg.timeout): Promise<Buffer> {
+    return streamRequest(this.conn, '', subject, data, timeoutMs)
+  }
 
   // ── Subscribe ─────────────────────────────────────────────────────────────
 

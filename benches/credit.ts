@@ -74,7 +74,7 @@ async function runScenario(maxCredit: number | null): Promise<void> {
 
   const payload = Buffer.alloc(SIZE, 0x42)
   const t0 = process.hrtime.bigint()
-  for (let i = 0; i < MSGS; i++) pubClient.publish(subject, payload)
+  for (let i = 0; i < MSGS; i++) pubClient.publish(stream, subject, payload)
 
   const deadline = Date.now() + 30_000
   while (received < MSGS && Date.now() < deadline) {
