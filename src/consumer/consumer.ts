@@ -4,6 +4,7 @@ import type { Subscription } from '../subscription/subscription'
 import type { Message } from '../message/message'
 import type { Encoding } from '../utils/codec'
 import { makeLazyMessage, type LazyMessage } from '../topic/lazy-message'
+import { streamPublish } from '../stream/publish'
 
 type RawCallback = (msg: Message) => void
 
@@ -17,6 +18,10 @@ export class Consumer {
   ) {}
 
   get name(): string { return this.config.name ?? this.streamName }
+
+  publish(subject: string, data: Buffer): void {
+    streamPublish(this.client._conn(), this.streamName, subject, data)
+  }
 
   async create(): Promise<this> {
     await this.client.createConsumer(this.streamName, this.config)

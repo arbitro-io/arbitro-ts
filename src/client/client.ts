@@ -9,8 +9,6 @@ import {
 } from '../types/config'
 import { Stream } from '../stream/stream'
 import { Consumer } from '../consumer/consumer'
-import { Topic } from '../topic/topic'
-import type { Encoding } from '../utils/codec'
 import { serializeStreamConfig, serializeConsumerConfig, serializeDeleteStreamOpts } from './serialize'
 
 type MsgCallback = (msg: import('../message/message').Message) => void
@@ -20,10 +18,6 @@ const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger'>> = {
   prefix:    '',
   timeout:   5_000,
   reconnect: { enabled: true, maxAttempts: 10, intervalMs: 500, jitter: true },
-}
-
-function toWireSubject(prefix: string, subject: string): string {
-  return prefix ? `${prefix}.${subject}` : subject
 }
 
 export class ArbitroClient {
@@ -47,67 +41,11 @@ export class ArbitroClient {
     return this
   }
 
-  // ── Publish ───────────────────────────────────────────────────────────────
+  /** Internal connection accessor for Stream/Consumer publish methods. */
+  _conn(): Connection { return this.conn }
 
-  /** Fire-and-forget. NoAck flag skips server confirmation — maximum throughput. */
-  publish(subject: string, data: Buffer): void {
-    this.conn.send(pack({
-      action:  Action.PubPublish,
-      flags:   Flags.NoAck,
-      seq:     this.conn.nextSeq(),
-      subject: toWireSubject(this.cfg.prefix, subject),
-      data,
-    }))
-  }
-
-  // Publish and wait for a reply from a subscriber (request-reply pattern).
-  // Sets FLAG_REPLY_TO. Blocks until the subscriber calls msg.reply() or timeout elapses.
-  async request(subject: string, data: Buffer, timeoutMs = this.cfg.timeout): Promise<Buffer> {
-    const seq = this.conn.nextSeq()
-    const frame = pack({
-      action:  Action.PubPublish,
-      flags:   Flags.ReplyTo,
-      seq,
-      subject: toWireSubject(this.cfg.prefix, subject),
-      data,
-    })
-    const reply = await this.conn.sendRequest(seq, frame, timeoutMs)
-    return reply.subarray(HEADER_SIZE)
-  }
-
-  // Publish and wait for server to process it.
-  // Uses a SysKeepalive fence: the server echoes it as RepOk only after
-  // processing everything before it on the same TCP connection.
-  async publishAck(subject: string, data: Buffer): Promise<void> {
-    this.conn.send(pack({
-      action:  Action.PubPublish,
-      flags:   Flags.None,
-      seq:     this.conn.nextSeq(),
-      subject: toWireSubject(this.cfg.prefix, subject),
-      data,
-    }))
-    await this.conn.sendExpectReply(pack({
-      action:  Action.SysKeepalive,
-      flags:   Flags.None,
-      seq:     this.conn.nextSeq(),
-      subject: '',
-      data:    Buffer.alloc(0),
-    }))
-  }
-
-  // Publish multiple messages as a single write syscall (all NoAck).
-  publishBatch(messages: [subject: string, data: Buffer][]): void {
-    const frames = messages.map(([subject, data]) =>
-      pack({
-        action:  Action.PubPublish,
-        flags:   Flags.NoAck,
-        seq:     this.conn.nextSeq(),
-        subject: toWireSubject(this.cfg.prefix, subject),
-        data,
-      })
-    )
-    this.conn.send(Buffer.concat(frames))
-  }
+  /** Default timeout from config. */
+  get timeout(): number { return this.cfg.timeout }
 
   // ── Subscribe ─────────────────────────────────────────────────────────────
 
@@ -280,12 +218,8 @@ export class ArbitroClient {
 
   // ── Domain helpers ────────────────────────────────────────────────────────
 
-  stream(name: string): Stream {
-    return new Stream(this, name)
-  }
-
-  topic<T extends Record<string, unknown>>(subject: string, codec: Encoding<T>): Topic<T> {
-    return new Topic(this, subject, codec)
+  stream(name: string, config?: StreamConfig): Stream {
+    return new Stream(this, name, config)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import type { StreamConfig, ConsumerConfig, DeleteStreamOpts, StreamInfo } from 
 import type { Encoding } from '../utils/codec'
 import { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
+import { streamPublish, streamPublishAck, streamPublishBatch, streamRequest } from './publish'
 
 // Stream — context object carrying name + config.
 // No network calls at construction — only at .create(), .upsert(), and .delete().
@@ -17,18 +18,21 @@ export class Stream {
     this._config = config
   }
 
-  /** The StreamConfig used to create this stream, if known. */
   get config(): StreamConfig | undefined { return this._config }
 
-  async create(config: StreamConfig): Promise<this> {
-    this._config = config
-    await this.client.createStream(this.name, config)
+  async create(config?: StreamConfig): Promise<this> {
+    const cfg = config ?? this._config
+    if (!cfg) throw new Error('StreamConfig required — pass to create() or constructor')
+    this._config = cfg
+    await this.client.createStream(this.name, cfg)
     return this
   }
 
-  async upsert(config: StreamConfig): Promise<this> {
-    this._config = config
-    await this.client.upsertStream(this.name, config)
+  async upsert(config?: StreamConfig): Promise<this> {
+    const cfg = config ?? this._config
+    if (!cfg) throw new Error('StreamConfig required — pass to upsert() or constructor')
+    this._config = cfg
+    await this.client.upsertStream(this.name, cfg)
     return this
   }
 
@@ -44,9 +48,26 @@ export class Stream {
     return this.client.getStreamInfo(this.name)
   }
 
-  // Pure construction of a Consumer context with defaults derived from this stream.
-  // name defaults to stream name, filter defaults to "${name}.>".
-  // Call consumer.create() / consumer.upsert() for server-side registration.
+  // ── Publish ─────────────────────────────────────────────────────────────
+
+  publish(subject: string, data: Buffer): void {
+    streamPublish(this.client._conn(), this.name, subject, data)
+  }
+
+  publishAck(subject: string, data: Buffer): Promise<void> {
+    return streamPublishAck(this.client._conn(), this.name, subject, data)
+  }
+
+  publishBatch(messages: [subject: string, data: Buffer][]): void {
+    streamPublishBatch(this.client._conn(), this.name, messages)
+  }
+
+  request(subject: string, data: Buffer, timeoutMs?: number): Promise<Buffer> {
+    return streamRequest(this.client._conn(), this.name, subject, data, timeoutMs ?? this.client.timeout)
+  }
+
+  // ── Context factories ───────────────────────────────────────────────────
+
   consumer(overrides?: Partial<ConsumerConfig>): Consumer {
     const config: ConsumerConfig = {
       ...overrides,
@@ -56,8 +77,7 @@ export class Stream {
     return new Consumer(this.client, this.name, config)
   }
 
-  // Returns a Topic<T> bound to subject + codec — no network call.
   topic<T extends Record<string, unknown>>(subject: string, codec: Encoding<T>): Topic<T> {
-    return new Topic(this.client, subject, codec)
+    return new Topic(this, subject, codec)
   }
 }

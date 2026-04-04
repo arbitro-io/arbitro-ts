@@ -1,4 +1,5 @@
 export * from './constants'
 export * from './crc32c'
 export * from './codec'
+export * from './fnv1a'
 export { Framer } from './framer'

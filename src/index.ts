@@ -5,6 +5,7 @@ export { encodeString, decodeString, encodeJson, decodeJson } from "./utils";
 export { makeLazyMessage, type LazyMessage } from "./topic";
 export { Subscription } from "./subscription";
 export { ArbitroClient } from "./client";
+export { streamId } from "./proto/fnv1a";
 export { Consumer } from "./consumer";
 export { Message } from "./message";
 export { Stream } from "./stream";

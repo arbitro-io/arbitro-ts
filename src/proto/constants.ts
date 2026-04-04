@@ -31,6 +31,8 @@ export const enum Action {
   PubPull           = 0x0106,
   PubCreateConsumer = 0x0107,
   PubDeleteConsumer = 0x0108,
+  PubPublishStream  = 0x0109,
+  PubPublishBatch   = 0x010A,
 
   RepAck   = 0x0201,
   RepNack  = 0x0202,
