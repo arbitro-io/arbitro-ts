@@ -61,12 +61,12 @@ export class Consumer {
     opts?: SubscribeOptions,
   ): Promise<Subscription> {
     if (!codecOrCb || typeof codecOrCb === 'function') {
-      return this.client.subscribe(this.name, codecOrCb as RawCallback | undefined, cbOrOpts as SubscribeOptions | undefined)
+      return this.client.subscribe(this.streamName, this.config, codecOrCb as RawCallback | undefined, cbOrOpts as SubscribeOptions | undefined)
     }
     const codec  = codecOrCb
     const cb     = cbOrOpts as (msg: LazyMessage<T>) => void
     const fields = codec.fields ?? []
-    return this.client.subscribe(this.name, (raw) => {
+    return this.client.subscribe(this.streamName, this.config, (raw) => {
       cb(makeLazyMessage(raw.data(), codec, fields, () => raw.ack(), () => raw.nack()))
     }, opts)
   }

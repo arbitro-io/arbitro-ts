@@ -86,14 +86,13 @@ async function main(): Promise<void> {
   const { stream, subject, consumer } = unique('bench-chaos')
 
   await admin.createStream(stream, { subjectFilter: `${stream}.>`, journal: { type: JournalType.Tolerant } })
-  await admin.createConsumer(stream, {
+  const chaosCfg = {
     name: consumer,
     filter: `${stream}.>`,
     ackPolicy: AckPolicy.Explicit,
     deliverPolicy: DeliverPolicy.All,
     maxAckPending: Math.max(5_000, RATE * DURATION),
-  })
-
+  }
   const sentSeqs = new Set<number>()
   const receivedSeqs = new Set<number>()
   let deliveries = 0
@@ -102,7 +101,7 @@ async function main(): Promise<void> {
   const start = Date.now()
   const stopAt = start + DURATION * 1000
 
-  const sub = await subClient.subscribe(consumer, (msg) => {
+  const sub = await subClient.subscribe(stream, chaosCfg, (msg) => {
     deliveries++
     const data = msg.data()
     if (data.length >= 4) receivedSeqs.add(data.readUInt32LE(0))

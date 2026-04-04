@@ -32,6 +32,8 @@ export function requiresSubject(action: Action): boolean {
     action === Action.PubDeleteConsumer ||
     action === Action.PubPublishStream ||
     action === Action.PubPublishBatch ||
+    action === Action.RepAck ||
+    action === Action.RepNack ||
     action === Action.SysStats ||
     action === Action.MgmtGetStream ||
     action === Action.MgmtGetConsumer

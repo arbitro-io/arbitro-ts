@@ -26,9 +26,10 @@ interface PendingRequest {
 }
 
 interface ActiveSubscription {
-  group:   string
-  handler: DeliveryHandler
-  onRenew: ((newSubId: bigint) => void) | undefined
+  streamName: string
+  configData: Buffer
+  handler:    DeliveryHandler
+  onRenew:    ((newSubId: bigint) => void) | undefined
 }
 
 function parseAddr(addr: string): { host: string; port: number } {
@@ -115,8 +116,9 @@ export class Connection {
     // switch compiles to a jump table in V8 — O(1) dispatch regardless of action.
     switch (frame.readUInt16LE(6) as Action) {
       case Action.RepOk: {
-        const seq = frame.readBigUInt64LE(OFF_SEQUENCE)
-        this.mgmtQ.shift()?.resolve(seq)
+        // timestamp field carries server-assigned sub_id (for subscribe) or 0.
+        const subId = frame.readBigUInt64LE(OFF_TIMESTAMP)
+        this.mgmtQ.shift()?.resolve(subId)
         return
       }
       case Action.RepError: {
@@ -136,12 +138,11 @@ export class Connection {
         if (p) { this.pendingRequests.delete(seq); p.resolve(frame) }
         return
       }
-      case Action.PubPublish: {
+      case Action.RepMessage: {
         // sub_id is patched into the timestamp field by the server drain thread.
         const subId   = frame.readBigUInt64LE(OFF_TIMESTAMP)
         const handler = this.routes.get(subId)
         if (!handler) {
-          // Surface unknown subId as a warning — never silent drop (invariant #3).
           this.log.warn({ subId: subId.toString() }, 'delivery frame for unknown subId')
           return
         }
@@ -160,10 +161,12 @@ export class Connection {
   // ── Subscriptions ─────────────────────────────────────────────────────────
 
   // Send PubSubscribe, register the delivery route, and track for reconnect.
+  // subject = stream name, data = msgpack consumer config (broker protocol).
   async sendSubscribe(
-    group:    string,
-    handler:  DeliveryHandler,
-    onRenew?: (newSubId: bigint) => void,
+    streamName: string,
+    configData: Buffer,
+    handler:    DeliveryHandler,
+    onRenew?:   (newSubId: bigint) => void,
   ): Promise<bigint> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
@@ -177,7 +180,7 @@ export class Connection {
           // This closes the race where the server sends RepOk + first delivery
           // in the same TCP burst during replay.
           this.routes.set(subId, handler)
-          this.activeSubs.set(subId, { group, handler, onRenew })
+          this.activeSubs.set(subId, { streamName, configData, handler, onRenew })
           resolve(subId)
         },
         reject: (err) => {
@@ -189,8 +192,8 @@ export class Connection {
         action:  Action.PubSubscribe,
         flags:   Flags.None,
         seq:     this.nextSeq(),
-        subject: group,
-        data:    Buffer.alloc(0),
+        subject: streamName,
+        data:    configData,
       }))
     })
   }
@@ -206,8 +209,8 @@ export class Connection {
     const subs = [...this.activeSubs.values()]
     this.activeSubs.clear()
     this.routes.clear()
-    for (const { group, handler, onRenew } of subs) {
-      this.sendSubscribe(group, handler, onRenew)
+    for (const { streamName, configData, handler, onRenew } of subs) {
+      this.sendSubscribe(streamName, configData, handler, onRenew)
         .then((newId) => { if (onRenew) onRenew(newId) })
         .catch(() => {})
     }
@@ -264,22 +267,22 @@ export class Connection {
     return unpackr.unpack(reply.subarray(HEADER_SIZE)) as T
   }
 
-  sendAck(subId: bigint, msgSeq: bigint): void {
+  sendAck(streamName: string, subId: bigint, msgSeq: bigint): void {
     this.socket.write(pack({
       action:    Action.RepAck,
-      seq:       msgSeq,
-      timestamp: subId,
-      subject:   Buffer.alloc(0),
+      seq:       subId,
+      timestamp: msgSeq,
+      subject:   streamName,
       data:      Buffer.alloc(0),
     }))
   }
 
-  sendNack(subId: bigint, msgSeq: bigint): void {
+  sendNack(streamName: string, subId: bigint, msgSeq: bigint): void {
     this.socket.write(pack({
       action:    Action.RepNack,
-      seq:       msgSeq,
-      timestamp: subId,
-      subject:   Buffer.alloc(0),
+      seq:       subId,
+      timestamp: msgSeq,
+      subject:   streamName,
       data:      Buffer.alloc(0),
     }))
   }

@@ -171,9 +171,8 @@ async function runPubSub(): Promise<void> {
   const { stream, subject, consumer: consumerGroup } = uniqueBenchNames('bench-pubsub')
 
   await createBenchStream(admin, stream)
-  await admin.createConsumer(stream, { name: consumerGroup, filter: `${stream}.>`, deliverPolicy: DeliverPolicy.New })
   const streamCtx = subClient.stream(stream)
-  const consumer = streamCtx.consumer({ name: consumerGroup, filter: `${stream}.>`, deliverPolicy: DeliverPolicy.New })
+  const consumer = streamCtx.consumer({ name: consumerGroup, filter: `${stream}.>`, deliverPolicy: DeliverPolicy.New, maxAckPending: Math.max(50_000, MSGS) })
 
   let received = 0
   let subStart = 0n
@@ -314,11 +313,9 @@ async function runCreditScenario(label: string, maxCredit: number | null): Promi
         creditRules: [{ pattern: '*.msg', limit: maxCredit }] }
     : { name: consumer, filter: subject, maxAckPending: 20_000, deliverPolicy: DeliverPolicy.All }
 
-  await admin.createConsumer(stream, consumerCfg)
-
   let received = 0
   const subClient = await connect()
-  const sub = await subClient.subscribe(consumer, (msg) => { msg.ack(); received++ })
+  const sub = await subClient.subscribe(stream, consumerCfg, (msg) => { msg.ack(); received++ })
 
   const pubClient = await connect()
   const pubStream = pubClient.stream(stream)
@@ -361,7 +358,6 @@ async function runLat(): Promise<void> {
   const { stream, subject, consumer: consumerGroup } = uniqueBenchNames('bench-lat')
 
   await createBenchStream(admin, stream)
-  await admin.createConsumer(stream, { name: consumerGroup, filter: `${stream}.>`, maxAckPending: 1, deliverPolicy: DeliverPolicy.New })
   const consumer = subClient.stream(stream).consumer({ name: consumerGroup, filter: `${stream}.>`, maxAckPending: 1, deliverPolicy: DeliverPolicy.New })
 
   const samples: number[] = []
@@ -407,14 +403,13 @@ async function runReplay(ackMode: boolean): Promise<void> {
   const { stream, subject, consumer } = uniqueBenchNames(ackMode ? 'bench-replay-ack' : 'bench-replay-noack')
 
   await createBenchStream(admin, stream)
-  await admin.createConsumer(stream, {
+  const replayCfg = {
     name: consumer,
     filter: `${stream}.>`,
     deliverPolicy: DeliverPolicy.All,
     ackPolicy: ackMode ? AckPolicy.Explicit : AckPolicy.None,
     maxAckPending: ackMode ? Math.max(50_000, Math.floor(MSGS / 5)) : undefined,
-  })
-
+  }
   const pubStream = pubClient.stream(stream)
   const payload = Buffer.alloc(SIZE, 0x42)
   const preloadStart = process.hrtime.bigint()
@@ -426,7 +421,7 @@ async function runReplay(ackMode: boolean): Promise<void> {
   let subStart = 0n
   let subEnd   = 0n
 
-  const subscription: Subscription = await subClient.subscribe(consumer, (msg) => {
+  const subscription: Subscription = await subClient.subscribe(stream, replayCfg, (msg) => {
     if (received >= MSGS) return
     if (received === 0) subStart = process.hrtime.bigint()
     received++
@@ -463,13 +458,12 @@ async function runPerf(): Promise<void> {
   const { stream, subject, consumer } = uniqueBenchNames('bench-perf')
 
   await createBenchStream(admin, stream)
-  await admin.createConsumer(stream, {
+  const perfCfg = {
     name: consumer,
     filter: `${stream}.>`,
     deliverPolicy: DeliverPolicy.New,
     maxAckPending: Math.max(50_000, RATE * Math.max(1, SECONDS)),
-  })
-
+  }
   const latenciesUs: number[] = []
   const nodeCpuSamples: number[] = []
   const nodeRssSamplesMiB: number[] = []
@@ -480,7 +474,7 @@ async function runPerf(): Promise<void> {
   let firstRecv = 0n
   let lastRecv = 0n
 
-  const subscription: Subscription = await subClient.subscribe(consumer, (msg) => {
+  const subscription: Subscription = await subClient.subscribe(stream, perfCfg, (msg) => {
     const now = process.hrtime.bigint()
     if (received === 0) firstRecv = now
     lastRecv = now

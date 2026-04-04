@@ -34,11 +34,13 @@ export const enum Action {
   PubPublishStream  = 0x0109,
   PubPublishBatch   = 0x010A,
 
-  RepAck   = 0x0201,
-  RepNack  = 0x0202,
-  RepOk    = 0x0203,
-  RepReply = 0x0204,
-  RepError = 0x0205,
+  RepAck     = 0x0201,
+  RepNack    = 0x0202,
+  RepOk      = 0x0203,
+  RepReply   = 0x0204,
+  RepError   = 0x0205,
+  RepMessage = 0x0206,
+  RepBatch   = 0x0207,
 
   MgmtRegisterPipeline   = 0x0301,
   MgmtUnregisterPipeline = 0x0302,

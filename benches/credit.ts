@@ -64,10 +64,8 @@ async function runScenario(maxCredit: number | null): Promise<void> {
         maxAckPending: 20_000,
       }
 
-  await admin.createConsumer(stream, consumerCfg)
-
   let received = 0
-  const sub = await subClient.subscribe(consumer, (msg) => {
+  const sub = await subClient.subscribe(stream, consumerCfg, (msg) => {
     received++
     msg.ack()
   })

@@ -20,6 +20,7 @@ export class Subscription {
   constructor(
     private subId: bigint,
     private readonly conn: Connection,
+    private readonly streamName: string,
     private readonly fetchTimeoutMs: number,
   ) {}
 
@@ -36,8 +37,8 @@ export class Subscription {
     const msg = new Message(
       frame,
       this.subId,
-      () => this.conn.sendAck(this.subId, msgSeq),
-      () => this.conn.sendNack(this.subId, msgSeq),
+      () => this.conn.sendAck(this.streamName, this.subId, msgSeq),
+      () => this.conn.sendNack(this.streamName, this.subId, msgSeq),
       (data) => this.conn.sendReply(msgSeq, data),
     )
 

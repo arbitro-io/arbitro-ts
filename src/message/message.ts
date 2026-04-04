@@ -1,10 +1,15 @@
-import { OFF_FLAGS, OFF_SEQUENCE, OFF_SUBJ_LEN, OFF_SUBJ } from '../proto/constants'
+import { OFF_FLAGS, OFF_SEQUENCE, OFF_CRC32C, HEADER_SIZE } from '../proto/constants'
 import { Flags } from '../proto/constants'
 
-// Zero-copy lazy view over a raw frame Buffer.
-// subject() and data() return subarray views — no allocation.
+// RepMessage layout:
+//   crc32c  (offset 8,  u32) = topic_len
+//   length  (offset 12, u32) = payload_len
+//   sequence(offset 16, u64) = journal seq
+//   timestamp(offset 24, u64) = sub_id
+//   after 32-byte header: topic_bytes (topic_len) + payload_bytes (payload_len)
+
 export class Message {
-  private _subjLen: number | undefined
+  private _topicLen: number | undefined
 
   constructor(
     private readonly frame:  Buffer,
@@ -14,30 +19,26 @@ export class Message {
     private readonly _reply?: (data: Buffer) => void,
   ) {}
 
-  private subjLen(): number {
-    return this._subjLen ??= this.frame.readUInt16LE(OFF_SUBJ_LEN)
+  private topicLen(): number {
+    return this._topicLen ??= this.frame.readUInt32LE(OFF_CRC32C)
   }
 
-  // Zero-copy view into the frame buffer.
   subject(): Buffer {
-    return this.frame.subarray(OFF_SUBJ, OFF_SUBJ + this.subjLen())
+    return this.frame.subarray(HEADER_SIZE, HEADER_SIZE + this.topicLen())
   }
 
-  // Zero-copy view into the frame buffer.
   data(): Buffer {
-    return this.frame.subarray(OFF_SUBJ + this.subjLen())
+    return this.frame.subarray(HEADER_SIZE + this.topicLen())
   }
 
   seq(): bigint {
     return this.frame.readBigUInt64LE(OFF_SEQUENCE)
   }
 
-  /** True if the publisher is waiting for a reply (`FLAG_REPLY_TO`). */
   hasReplyTo(): boolean { return (this.frame[OFF_FLAGS]! & Flags.ReplyTo) !== 0 }
 
   ack():  void { this._ack() }
   nack(): void { this._nack() }
 
-  /** Send a reply to the original publisher. Only valid when `hasReplyTo()` is true. */
   reply(data: Buffer): void { this._reply?.(data) }
 }

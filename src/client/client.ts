@@ -72,10 +72,11 @@ export class ArbitroClient {
 
   // ── Subscribe ─────────────────────────────────────────────────────────────
 
-  async subscribe(group: string, callback?: MsgCallback, opts?: SubscribeOptions): Promise<Subscription> {
-    const sub     = new Subscription(0n, this.conn, opts?.fetchTimeoutMs ?? 5_000)
-    const handler = (frame: Buffer) => sub.deliver(frame)
-    const subId   = await this.conn.sendSubscribe(group, handler, (id) => sub.updateSubId(id))
+  async subscribe(stream: string, config: ConsumerConfig, callback?: MsgCallback, opts?: SubscribeOptions): Promise<Subscription> {
+    const sub        = new Subscription(0n, this.conn, stream, opts?.fetchTimeoutMs ?? 5_000)
+    const handler    = (frame: Buffer) => sub.deliver(frame)
+    const configData = serializeConsumerConfig(config)
+    const subId      = await this.conn.sendSubscribe(stream, configData, handler, (id) => sub.updateSubId(id))
     sub.updateSubId(subId)
     if (callback) sub.onMessage(callback)
     return sub
