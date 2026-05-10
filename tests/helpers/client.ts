@@ -20,7 +20,7 @@ export function uniqueName(prefix = 'ts'): string {
 
 export async function cleanupNamedResources(client: ArbitroClient, names: string[]): Promise<void> {
   for (const name of [...new Set(names)].reverse()) {
-    try { await client.deleteConsumer(name) } catch {}
+    try { await client.deleteConsumer(name, name) } catch {}
     try { await client.deleteStream(name) } catch {}
   }
 }

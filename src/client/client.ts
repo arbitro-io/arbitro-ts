@@ -48,21 +48,42 @@ export class ArbitroClient {
   /** Default timeout from config. */
   get timeout(): number { return this.cfg.timeout }
 
-  // ── Publish (stream name required) ────────────────────────────────────────
+  // ── Publish (subject-routed via PubPublish) ────────────────────────────────
 
-  /** Fire-and-forget publish. Stream name is mandatory. */
-  publish(streamName: string, subject: string, data: Buffer): void {
+  /** Fire-and-forget publish. Subject is routed by the broker to the matching stream. */
+  publish(subject: string, data: Buffer): void {
+    this.conn.send(pack({
+      action:  Action.PubPublish,
+      flags:   Flags.NoAck,
+      seq:     this.conn.nextSeq(),
+      subject: this.applyPrefix(subject),
+      data,
+    }))
+  }
+
+  /** Publish and wait for server confirmation (RepOk). */
+  async publishAck(subject: string, data: Buffer): Promise<void> {
+    await this.conn.sendExpectReply(pack({
+      action:  Action.PubPublish,
+      seq:     this.conn.nextSeq(),
+      subject: this.applyPrefix(subject),
+      data,
+    }))
+  }
+
+  /** Batch fire-and-forget to a specific stream — single write syscall. */
+  publishBatch(streamName: string, messages: [subject: string, data: Buffer][]): void {
+    streamPublishBatch(this.conn, streamName, messages)
+  }
+
+  /** Direct-to-stream publish (bypasses subject router). */
+  publishToStream(streamName: string, subject: string, data: Buffer): void {
     streamPublish(this.conn, streamName, subject, data)
   }
 
-  /** Publish and wait for server confirmation. */
-  async publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
+  /** Direct-to-stream publish with server confirmation. */
+  async publishToStreamAck(streamName: string, subject: string, data: Buffer): Promise<void> {
     await streamPublishAck(this.conn, streamName, subject, data)
-  }
-
-  /** Batch fire-and-forget — single write syscall. */
-  publishBatch(streamName: string, messages: [subject: string, data: Buffer][]): void {
-    streamPublishBatch(this.conn, streamName, messages)
   }
 
   /** Request-reply. Waits for subscriber reply or timeout. */
@@ -72,13 +93,22 @@ export class ArbitroClient {
 
   // ── Subscribe ─────────────────────────────────────────────────────────────
 
-  async subscribe(stream: string, config: ConsumerConfig, callback?: MsgCallback, opts?: SubscribeOptions): Promise<Subscription> {
+  async subscribe(stream: string, callback: MsgCallback): Promise<Subscription>
+  async subscribe(stream: string, config: ConsumerConfig, callback?: MsgCallback, opts?: SubscribeOptions): Promise<Subscription>
+  async subscribe(
+    stream: string,
+    configOrCallback: ConsumerConfig | MsgCallback,
+    callback?: MsgCallback,
+    opts?: SubscribeOptions,
+  ): Promise<Subscription> {
+    const config = typeof configOrCallback === 'function' ? { name: stream } : configOrCallback
+    const cb     = typeof configOrCallback === 'function' ? configOrCallback : callback
     const sub        = new Subscription(0n, this.conn, stream, opts?.fetchTimeoutMs ?? 5_000)
     const handler    = (frame: Buffer) => sub.deliver(frame)
     const configData = serializeConsumerConfig(config)
     const subId      = await this.conn.sendSubscribe(stream, configData, handler, (id) => sub.updateSubId(id))
     sub.updateSubId(subId)
-    if (callback) sub.onMessage(callback)
+    if (cb) sub.onMessage(cb)
     return sub
   }
 
@@ -121,18 +151,22 @@ export class ArbitroClient {
 
   async getStreamInfo(name: string): Promise<StreamInfo | null> {
     const seq = this.conn.nextSeq()
-    const raw = await this.conn.requestMsgpack<any>(
-      seq,
-      pack({
-        action:  Action.MgmtGetStream,
-        flags:   Flags.None,
+    try {
+      const raw = await this.conn.requestMsgpack<any>(
         seq,
-        subject: name,
-        data:    Buffer.alloc(0),
-      }),
-      this.cfg.timeout,
-    )
-    return raw ? normalizeStreamInfo(raw) : null
+        pack({
+          action:  Action.MgmtGetStream,
+          flags:   Flags.None,
+          seq,
+          subject: name,
+          data:    Buffer.alloc(0),
+        }),
+        this.cfg.timeout,
+      )
+      return raw ? normalizeStreamInfo(raw) : null
+    } catch {
+      return null
+    }
   }
 
   async listStreams(): Promise<StreamInfo[]> {
@@ -171,7 +205,7 @@ export class ArbitroClient {
 
   async upsertConsumer(stream: string, config: ConsumerConfig): Promise<Consumer> {
     const group = config.name ?? stream
-    const existing = await this.getConsumerInfo(group)
+    const existing = await this.getConsumerInfo(stream, group)
     const requested = canonicalConsumerConfig(stream, config)
     if (!existing) return this.createConsumer(stream, config)
     if (!sameConsumerConfig(canonicalConsumerInfo(existing), requested)) {
@@ -194,33 +228,39 @@ export class ArbitroClient {
     }))
   }
 
-  async deleteConsumer(name: string): Promise<void> {
+  async deleteConsumer(stream: string, group?: string): Promise<void> {
+    const g = group ?? stream
     await this.conn.sendExpectReply(pack({
       action:  Action.PubDeleteConsumer,
       flags:   Flags.None,
       seq:     this.conn.nextSeq(),
-      subject: name,
-      data:    Buffer.alloc(0),
+      subject: stream,
+      data:    Buffer.from(g),
     }))
   }
 
-  async getConsumerInfo(group: string): Promise<ConsumerInfo | null> {
+  async getConsumerInfo(stream: string, group?: string): Promise<ConsumerInfo | null> {
+    const g = group ?? stream
     const seq = this.conn.nextSeq()
-    const raw = await this.conn.requestMsgpack<any>(
-      seq,
-      pack({
-        action:  Action.MgmtGetConsumer,
-        flags:   Flags.None,
+    try {
+      const raw = await this.conn.requestMsgpack<any>(
         seq,
-        subject: group,
-        data:    Buffer.alloc(0),
-      }),
-      this.cfg.timeout,
-    )
-    return raw ? normalizeConsumerInfo(group, raw) : null
+        pack({
+          action:  Action.MgmtGetConsumer,
+          flags:   Flags.None,
+          seq,
+          subject: stream,
+          data:    Buffer.from(g),
+        }),
+        this.cfg.timeout,
+      )
+      return raw ? normalizeConsumerInfo(g, raw) : null
+    } catch {
+      return null
+    }
   }
 
-  async listConsumers(): Promise<ConsumerInfo[]> {
+  async listConsumers(stream?: string): Promise<ConsumerInfo[]> {
     const seq = this.conn.nextSeq()
     const raw = await this.conn.requestMsgpack<any[]>(
       seq,
@@ -228,7 +268,7 @@ export class ArbitroClient {
         action:  Action.MgmtListConsumers,
         flags:   Flags.None,
         seq,
-        subject: '',
+        subject: stream ?? '',
         data:    Buffer.alloc(0),
       }),
       this.cfg.timeout,
@@ -236,11 +276,15 @@ export class ArbitroClient {
     return raw.map((info) => normalizeConsumerInfo(info.config?.group ?? info.group ?? '', info))
   }
 
-  async consumerExists(group: string): Promise<boolean> {
-    return (await this.getConsumerInfo(group)) !== null
+  async consumerExists(stream: string, group?: string): Promise<boolean> {
+    return (await this.getConsumerInfo(stream, group)) !== null
   }
 
   // ── Domain helpers ────────────────────────────────────────────────────────
+
+  private applyPrefix(subject: string): string {
+    return this.cfg.prefix ? `${this.cfg.prefix}.${subject}` : subject
+  }
 
   stream(name: string, config?: StreamConfig): Stream {
     return new Stream(this, name, config)
@@ -270,36 +314,36 @@ function sameConsumerConfig(a: ConsumerConfig, b: ConsumerConfig): boolean {
 }
 
 function normalizeStreamInfo(raw: any): StreamInfo {
-  return {
+  const info: StreamInfo & { lastSeq?: number } = {
     name: raw.name,
-    config: normalizeStreamConfig(raw.config),
+    config: raw.config ? normalizeStreamConfig(raw.config) : { subjectFilter: '' },
     lastSeq: raw.last_seq ?? raw.lastSeq ?? 0,
-  } as StreamInfo & { lastSeq?: number }
+  }
+  return info
 }
 
 function normalizeStreamConfig(raw: any): StreamConfig {
-  const journalType = raw.journal?.type ?? raw.journal_type
+  const journalType = raw.journal?.type ?? raw.journal_kind ?? raw.journal_type
   const config: StreamConfig = {
-    subjectFilter: raw.subjectFilter ?? raw.subject_filter,
+    subjectFilter: raw.subjectFilter ?? raw.filter ?? raw.subject_filter,
   }
   if (journalType) config.journal = { type: journalType as JournalType }
   const maxMsgs = raw.maxMsgs ?? raw.max_msgs
   const maxBytes = raw.maxBytes ?? raw.max_bytes
-  if (maxMsgs !== undefined && maxMsgs !== null) config.maxMsgs = maxMsgs
-  if (maxBytes !== undefined && maxBytes !== null) config.maxBytes = maxBytes
-  const maxAgeMs = raw.maxAgeMs
-    ?? (raw.max_age_ns !== undefined && raw.max_age_ns !== null
-      ? Number(BigInt(raw.max_age_ns) / 1_000_000n)
-      : undefined)
-  if (maxAgeMs !== undefined) config.maxAgeMs = maxAgeMs
+  if (maxMsgs) config.maxMsgs = maxMsgs
+  if (maxBytes) config.maxBytes = maxBytes
+  const maxAgeNs = raw.max_age_ns ?? raw.maxAgeNs
+  const maxAgeMs = raw.maxAgeMs ?? (maxAgeNs ? Number(BigInt(maxAgeNs) / 1_000_000n) : undefined)
+  if (maxAgeMs) config.maxAgeMs = maxAgeMs
   return config
 }
 
 function normalizeConsumerInfo(group: string, raw: any): ConsumerInfo {
+  const cfg = raw.config ?? raw
   return {
-    group: raw.group ?? raw.config?.group ?? group,
+    group: cfg.group ?? group,
     stream: raw.stream,
-    config: normalizeConsumerConfig(raw.config),
+    config: normalizeConsumerConfig(cfg),
   }
 }
 

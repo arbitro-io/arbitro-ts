@@ -36,7 +36,8 @@ export function requiresSubject(action: Action): boolean {
     action === Action.RepNack ||
     action === Action.SysStats ||
     action === Action.MgmtGetStream ||
-    action === Action.MgmtGetConsumer
+    action === Action.MgmtGetConsumer ||
+    action === Action.MgmtListConsumers
   )
 }
 

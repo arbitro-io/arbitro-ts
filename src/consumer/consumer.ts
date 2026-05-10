@@ -67,7 +67,7 @@ export class Consumer {
     const cb     = cbOrOpts as (msg: LazyMessage<T>) => void
     const fields = codec.fields ?? []
     return this.client.subscribe(this.streamName, this.config, (raw) => {
-      cb(makeLazyMessage(raw.data(), codec, fields, () => raw.ack(), () => raw.nack()))
+      cb(makeLazyMessage(raw.data(), codec, fields, () => raw.ack(), () => raw.nack(), (ms) => raw.nackDelay(ms)))
     }, opts)
   }
 }

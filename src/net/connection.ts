@@ -16,7 +16,7 @@ type DeliveryHandler = (frame: Buffer) => void
 const unpackr = new Unpackr({ structuredClone: false, useRecords: false })
 
 interface PendingMgmt {
-  resolve: (seqOrSubId: bigint) => void
+  resolve: (frame: Buffer) => void
   reject:  (err: Error) => void
 }
 
@@ -116,9 +116,7 @@ export class Connection {
     // switch compiles to a jump table in V8 — O(1) dispatch regardless of action.
     switch (frame.readUInt16LE(6) as Action) {
       case Action.RepOk: {
-        // timestamp field carries server-assigned sub_id (for subscribe) or 0.
-        const subId = frame.readBigUInt64LE(OFF_TIMESTAMP)
-        this.mgmtQ.shift()?.resolve(subId)
+        this.mgmtQ.shift()?.resolve(frame)
         return
       }
       case Action.RepError: {
@@ -128,7 +126,9 @@ export class Connection {
           broker = unpackr.unpack(payload) as BrokerError
         } catch {}
         const msg = broker?.message ?? (payload.toString('utf8') || 'server error')
-        this.mgmtQ.shift()?.reject(new ArbitroError(msg, 'server', broker?.name, broker?.details))
+        const err = new ArbitroError(msg, 'server', broker?.name, broker?.details)
+        // RepError does NOT echo client_seq — use FIFO matching only.
+        this.mgmtQ.shift()?.reject(err)
         return
       }
       case Action.RepReply: {
@@ -174,8 +174,9 @@ export class Connection {
         5_000,
       )
       this.mgmtQ.push({
-        resolve: (subId) => {
+        resolve: (frame) => {
           clearTimeout(timer)
+          const subId = frame.readBigUInt64LE(OFF_TIMESTAMP)
           // Install the delivery route before yielding back to the caller.
           // This closes the race where the server sends RepOk + first delivery
           // in the same TCP burst during replay.
@@ -232,7 +233,7 @@ export class Connection {
     this.socket.write(frame)
   }
 
-  // Send frame and wait for RepOk.
+  // Send frame and wait for RepOk. Returns the server_seq (timestamp field).
   sendExpectReply(frame: Buffer, timeoutMs = 5_000): Promise<bigint> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
@@ -240,7 +241,22 @@ export class Connection {
         timeoutMs,
       )
       this.mgmtQ.push({
-        resolve: (v) => { clearTimeout(timer); resolve(v) },
+        resolve: (f) => { clearTimeout(timer); resolve(f.readBigUInt64LE(OFF_TIMESTAMP)) },
+        reject:  (e) => { clearTimeout(timer); reject(e) },
+      })
+      this.socket.write(frame)
+    })
+  }
+
+  // Send frame and wait for RepOk with data. Returns data bytes after header.
+  sendExpectReplyData(frame: Buffer, timeoutMs = 5_000): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new ArbitroError('request timeout: no RepOk from server', 'timeout')),
+        timeoutMs,
+      )
+      this.mgmtQ.push({
+        resolve: (f) => { clearTimeout(timer); resolve(f.subarray(HEADER_SIZE)) },
         reject:  (e) => { clearTimeout(timer); reject(e) },
       })
       this.socket.write(frame)
@@ -263,8 +279,17 @@ export class Connection {
   }
 
   async requestMsgpack<T>(seq: bigint, frame: Buffer, timeoutMs: number): Promise<T> {
-    const reply = await this.sendRequest(seq, frame, timeoutMs)
-    return unpackr.unpack(reply.subarray(HEADER_SIZE)) as T
+    const data = await this.sendExpectReplyData(frame, timeoutMs)
+    return unpackr.unpack(data) as T
+  }
+
+  sendUnsubscribe(streamName: string, subId: bigint): void {
+    this.socket.write(pack({
+      action:    Action.PubUnsubscribe,
+      seq:       subId,
+      subject:   streamName,
+      data:      Buffer.alloc(0),
+    }))
   }
 
   sendAck(streamName: string, subId: bigint, msgSeq: bigint): void {
@@ -284,6 +309,18 @@ export class Connection {
       timestamp: msgSeq,
       subject:   streamName,
       data:      Buffer.alloc(0),
+    }))
+  }
+
+  sendNackDelay(streamName: string, subId: bigint, msgSeq: bigint, delayMs: number): void {
+    const data = Buffer.allocUnsafe(4)
+    data.writeUInt32LE(delayMs, 0)
+    this.socket.write(pack({
+      action:    Action.RepNack,
+      seq:       subId,
+      timestamp: msgSeq,
+      subject:   streamName,
+      data,
     }))
   }
 

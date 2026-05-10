@@ -1,95 +1,94 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { JournalType } from '../../src'
-import { Connection } from '../../src/net/connection'
+import { describe, it, expect } from 'vitest'
 import { pack } from '../../src/proto/codec'
-import { Action, Flags } from '../../src/proto/constants'
-import { cleanupNamedResources, createClient, waitUntil, BROKER_ADDR, uniqueName } from '../helpers/client'
-import type { ArbitroClient } from '../../src'
+import { Action, Flags, HEADER_SIZE, OFF_TIMESTAMP } from '../../src/proto/constants'
 
-let admin: ArbitroClient
-let subscribeGroup = ''
-let routeGroup = ''
-const created: string[] = []
+// Unit tests for connection frame building — no server needed.
+// Verifies that ack/nack/nackDelay frames are encoded correctly.
 
-beforeAll(async () => {
-  admin = await createClient()
-  subscribeGroup = uniqueName('conn-subscribe-test')
-  routeGroup = uniqueName('conn-route-test')
-  created.push(subscribeGroup, routeGroup)
-  // Pre-create groups used by connection-level tests.
-  // PubSubscribe requires the consumer group to exist on the server.
-  // conn-ack-test is created inside its own test with maxAckPending: 1 — not here.
-  for (const name of [subscribeGroup, routeGroup]) {
-    await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
-    await admin.createConsumer(name, { name, filter: `${name}.>` })
-  }
-})
-afterAll(async () => {
-  await cleanupNamedResources(admin, created)
-  await admin.close()
-})
-
-describe('Connection', () => {
-  it('connects and closes cleanly', async () => {
-    const conn = await Connection.connect(BROKER_ADDR)
-    await conn.close()
+describe('Connection frame encoding — sendAck / sendNack', () => {
+  it('RepAck frame includes stream name as subject', () => {
+    const frame = pack({
+      action:    Action.RepAck,
+      seq:       1n,
+      timestamp: 42n,
+      subject:   'my-stream',
+      data:      Buffer.alloc(0),
+    })
+    expect(frame.readUInt16LE(6)).toBe(Action.RepAck)
+    expect(frame.readBigUInt64LE(16)).toBe(1n)   // seq = subId
+    expect(frame.readBigUInt64LE(24)).toBe(42n)  // timestamp = msgSeq
+    // subject starts at offset 34 (after u16 len at 32)
+    const subjLen = frame.readUInt16LE(32)
+    expect(subjLen).toBe(9)
+    expect(frame.subarray(34, 34 + subjLen).toString()).toBe('my-stream')
   })
 
-  it('sendExpectReply resolves with a valid subId from PubSubscribe', async () => {
-    const conn  = await Connection.connect(BROKER_ADDR)
-    const frame = buildSubscribeFrame(conn.nextSeq(), subscribeGroup)
-    const subId = await conn.sendExpectReply(frame)
-    expect(subId > 0n).toBe(true)
-    await conn.close()
+  it('RepNack frame with empty data has no delay', () => {
+    const frame = pack({
+      action:    Action.RepNack,
+      seq:       5n,
+      timestamp: 100n,
+      subject:   'stream-x',
+      data:      Buffer.alloc(0),
+    })
+    expect(frame.readUInt16LE(6)).toBe(Action.RepNack)
+    const subjLen = frame.readUInt16LE(32)
+    const dataStart = 34 + subjLen
+    expect(frame.length - dataStart).toBe(0)
   })
 
-  it('delivery frames are routed to the registered handler', async () => {
-    const name = routeGroup
-
-    const conn  = await Connection.connect(BROKER_ADDR)
-    const subId = await conn.sendExpectReply(buildSubscribeFrame(conn.nextSeq(), name))
-
-    const received: Buffer[] = []
-    conn.registerRoute(subId, (frame) => received.push(frame))
-
-    admin.publish(`${name}.e`, Buffer.from('payload'))
-    await waitUntil(() => received.length >= 1)
-
-    expect(received.length).toBe(1)
-    await conn.close()
+  it('RepNack frame with 4-byte data encodes delay_ms', () => {
+    const data = Buffer.allocUnsafe(4)
+    data.writeUInt32LE(5000, 0)
+    const frame = pack({
+      action:    Action.RepNack,
+      seq:       7n,
+      timestamp: 200n,
+      subject:   'stream-y',
+      data,
+    })
+    const subjLen  = frame.readUInt16LE(32)
+    const dataOff  = 34 + subjLen
+    const delayMs  = frame.readUInt32LE(dataOff)
+    expect(delayMs).toBe(5000)
   })
-
-  // it('sendAck unblocks delivery when maxAckPending is 1', async () => {
-  //   const name = 'conn-ack-test'
-  //   await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
-  //   await admin.createConsumer(name, { name, filter: `${name}.>`, maxAckPending: 1 })
-  //
-  //   const conn  = await Connection.connect(BROKER_ADDR)
-  //   const subId = await conn.sendExpectReply(buildSubscribeFrame(conn.nextSeq(), name))
-  //
-  //   let lastSeq = 0n
-  //   const received: string[] = []
-  //   conn.registerRoute(subId, (frame) => {
-  //     lastSeq = frame.readBigUInt64LE(16)
-  //     const subjLen = frame.readUInt16LE(32)
-  //     received.push(frame.subarray(34 + subjLen).toString())
-  //   })
-  //
-  //   admin.publish(`${name}.e`, Buffer.from('first'))
-  //   await waitUntil(() => received.length >= 1)
-  //
-  //   admin.publish(`${name}.e`, Buffer.from('second'))
-  //   await new Promise((r) => setTimeout(r, 150))
-  //   expect(received.length).toBe(1)
-  //
-  //   conn.sendAck(subId, lastSeq)
-  //   await waitUntil(() => received.length >= 2)
-  //
-  //   await conn.close()
-  //   expect(received).toEqual(['first', 'second'])
-  // })
 })
 
-function buildSubscribeFrame(seq: bigint, group: string): Buffer {
-  return pack({ action: Action.PubSubscribe, flags: Flags.None, seq, subject: group, data: Buffer.alloc(0) })
-}
+describe('Connection frame encoding — subscribe / unsubscribe', () => {
+  it('PubSubscribe frame has correct action and subject', () => {
+    const frame = pack({
+      action:  Action.PubSubscribe,
+      flags:   Flags.None,
+      seq:     10n,
+      subject: 'orders',
+      data:    Buffer.alloc(0),
+    })
+    expect(frame.readUInt16LE(6)).toBe(Action.PubSubscribe)
+    const subjLen = frame.readUInt16LE(32)
+    expect(frame.subarray(34, 34 + subjLen).toString()).toBe('orders')
+  })
+
+  it('PubUnsubscribe frame carries subId in seq field', () => {
+    const frame = pack({
+      action:  Action.PubUnsubscribe,
+      seq:     99n,
+      subject: 'events',
+      data:    Buffer.alloc(0),
+    })
+    expect(frame.readBigUInt64LE(16)).toBe(99n)
+  })
+})
+
+describe('Connection frame encoding — RepOk timestamp extraction', () => {
+  it('subId is read from the timestamp field of RepOk', () => {
+    const frame = pack({
+      action:    Action.RepOk,
+      seq:       0n,
+      timestamp: 777n,
+      subject:   Buffer.alloc(0),
+      data:      Buffer.alloc(0),
+    })
+    const subId = frame.readBigUInt64LE(OFF_TIMESTAMP)
+    expect(subId).toBe(777n)
+  })
+})

@@ -39,6 +39,7 @@ export class Subscription {
       this.subId,
       () => this.conn.sendAck(this.streamName, this.subId, msgSeq),
       () => this.conn.sendNack(this.streamName, this.subId, msgSeq),
+      (ms) => this.conn.sendNackDelay(this.streamName, this.subId, msgSeq, ms),
       (data) => this.conn.sendReply(msgSeq, data),
     )
 
@@ -85,6 +86,7 @@ export class Subscription {
 
   close(): void {
     this.closed = true
+    this.conn.sendUnsubscribe(this.streamName, this.subId)
     this.conn.cancelSubscription(this.subId)
     for (const p of this.fetchQueue) {
       clearTimeout(p.timer)

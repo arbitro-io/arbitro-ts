@@ -51,7 +51,7 @@ describe('ArbitroClient', () => {
     const received: string[] = []
     const sub = await client.subscribe(name, (msg) => received.push(msg.data().toString()))
 
-    client.publishBatch([
+    client.publishBatch(name, [
       [`${name}.e`, Buffer.from('a')],
       [`${name}.e`, Buffer.from('b')],
       [`${name}.e`, Buffer.from('c')],
@@ -81,10 +81,9 @@ describe('ArbitroClient', () => {
     const cfg = { name, filter: `${name}.>` }
     await client.createConsumer(name, cfg)
 
-    await expect(client.consumerExists(name)).resolves.toBe(true)
-    await expect(client.getConsumerInfo(name)).resolves.toMatchObject({
+    await expect(client.consumerExists(name, name)).resolves.toBe(true)
+    await expect(client.getConsumerInfo(name, name)).resolves.toMatchObject({
       group: name,
-      stream: name,
       config: { name, filter: `${name}.>` },
     })
     await expect(client.upsertConsumer(name, cfg)).resolves.toBeDefined()
@@ -95,8 +94,8 @@ describe('ArbitroClient', () => {
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
-    await client.deleteConsumer(name)
-    await expect(client.consumerExists(name)).resolves.toBe(false)
+    await client.deleteConsumer(name, name)
+    await expect(client.consumerExists(name, name)).resolves.toBe(false)
 
     await client.deleteStream(name, { deleteData: false })
     await expect(client.streamExists(name)).resolves.toBe(false)

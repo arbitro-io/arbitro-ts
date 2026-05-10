@@ -6,9 +6,9 @@ import {
 const packr = new Packr({ structuredClone: false, useRecords: false })
 
 export function serializeStreamConfig(cfg: StreamConfig): Buffer {
-  const wire: Record<string, unknown> = { subject_filter: cfg.subjectFilter }
+  const wire: Record<string, unknown> = { filter: cfg.subjectFilter }
   if (cfg.journal) {
-    wire['journal_type'] = cfg.journal.type
+    wire['journal_kind'] = cfg.journal.type
     if (cfg.journal.type === JournalType.Strict && cfg.journal.flush) {
       wire['flush_interval_ms']  = cfg.journal.flush.intervalMs
       wire['flush_max_messages'] = cfg.journal.flush.maxMessages

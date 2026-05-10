@@ -17,11 +17,11 @@ function makeFrame(value: Order): Buffer {
   })
 }
 
-function makeMsg(value: Order, onAck = () => {}, onNack = () => {}) {
+function makeMsg(value: Order, onAck = () => {}, onNack = () => {}, onNackDelay?: (ms: number) => void) {
   const frame = makeFrame(value)
   // data starts after header(32) + subjLen(2) + subj('orders.new' = 10)
   const data  = frame.subarray(32 + 2 + 'orders.new'.length)
-  return makeLazyMessage(data, OrderCodec, OrderCodec.fields, onAck, onNack)
+  return makeLazyMessage(data, OrderCodec, OrderCodec.fields, onAck, onNack, onNackDelay)
 }
 
 describe('LazyMessage', () => {
@@ -78,6 +78,18 @@ describe('LazyMessage', () => {
   it('nack calls onNack', () => {
     const onNack = vi.fn()
     makeMsg({ id: 1, status: 'x' }, () => {}, onNack).nack()
+    expect(onNack).toHaveBeenCalledOnce()
+  })
+
+  it('nackDelay calls onNackDelay with delay ms', () => {
+    const onNackDelay = vi.fn()
+    makeMsg({ id: 1, status: 'x' }, () => {}, () => {}, onNackDelay).nackDelay(5000)
+    expect(onNackDelay).toHaveBeenCalledWith(5000)
+  })
+
+  it('nackDelay falls back to onNack when no delay callback', () => {
+    const onNack = vi.fn()
+    makeMsg({ id: 1, status: 'x' }, () => {}, onNack).nackDelay(100)
     expect(onNack).toHaveBeenCalledOnce()
   })
 })

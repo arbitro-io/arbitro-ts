@@ -45,15 +45,15 @@ describe('codec — subject frames (Pub* actions)', () => {
 })
 
 describe('codec — non-subject frames (Rep* / Sys* actions)', () => {
-  it('RepAck: frame is exactly HEADER_SIZE bytes, no payload', () => {
+  it('RepAck: frame is HEADER_SIZE + 2 bytes (empty subject u16 prefix)', () => {
     const frame = pack({ action: Action.RepAck, seq: 1n, subject: Buffer.alloc(0), data: Buffer.alloc(0) })
-    expect(frame.length).toBe(HEADER_SIZE)
+    expect(frame.length).toBe(HEADER_SIZE + 2)
   })
 
   it('RepAck: subject() and data() return empty buffers without OOB', () => {
     const frame = pack({ action: Action.RepAck, seq: 1n, subject: Buffer.alloc(0), data: Buffer.alloc(0) })
     const view  = new FrameView(frame)
-    expect(view.hasSubject()).toBe(false)
+    expect(view.hasSubject()).toBe(true)
     expect(view.subject().length).toBe(0)
     expect(view.data().length).toBe(0)
   })
@@ -91,9 +91,14 @@ describe('requiresSubject', () => {
     for (const a of pubActions) expect(requiresSubject(a)).toBe(true)
   })
 
-  it('returns false for all Rep* actions', () => {
-    const repActions = [Action.RepAck, Action.RepNack, Action.RepOk, Action.RepReply, Action.RepError]
-    for (const a of repActions) expect(requiresSubject(a)).toBe(false)
+  it('returns false for non-subject Rep* actions', () => {
+    const repNoSubject = [Action.RepOk, Action.RepReply, Action.RepError]
+    for (const a of repNoSubject) expect(requiresSubject(a)).toBe(false)
+  })
+
+  it('returns true for RepAck and RepNack (wire protocol includes stream_name)', () => {
+    expect(requiresSubject(Action.RepAck)).toBe(true)
+    expect(requiresSubject(Action.RepNack)).toBe(true)
   })
 
   it('returns false for SysConnect, SysKeepalive, SysDisconnect', () => {

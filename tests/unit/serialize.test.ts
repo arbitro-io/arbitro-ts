@@ -7,16 +7,16 @@ const unpackr = new Unpackr({ useRecords: false })
 const unpack  = (buf: Buffer) => unpackr.unpack(buf) as Record<string, unknown>
 
 describe('serializeStreamConfig', () => {
-  it('encodes subject_filter', () => {
+  it('encodes filter', () => {
     const buf  = serializeStreamConfig({ subjectFilter: 'orders.>' })
     const wire = unpack(buf)
-    expect(wire['subject_filter']).toBe('orders.>')
+    expect(wire['filter']).toBe('orders.>')
   })
 
-  it('encodes journal_type', () => {
+  it('encodes journal_kind', () => {
     const buf  = serializeStreamConfig({ subjectFilter: 'x', journal: { type: JournalType.Tolerant } })
     const wire = unpack(buf)
-    expect(wire['journal_type']).toBe('Tolerant')
+    expect(wire['journal_kind']).toBe('Tolerant')
   })
 
   it('encodes flush config for Strict journal', () => {
@@ -41,7 +41,7 @@ describe('serializeStreamConfig', () => {
     expect(wire['max_msgs']).toBeUndefined()
     expect(wire['max_bytes']).toBeUndefined()
     expect(wire['max_age_ns']).toBeUndefined()
-    expect(wire['journal_type']).toBeUndefined()
+    expect(wire['journal_kind']).toBeUndefined()
   })
 })
 
