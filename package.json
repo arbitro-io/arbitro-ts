@@ -7,13 +7,13 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types":   "./dist/index.d.ts",
-      "import":  "./dist/index.mjs",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
       "require": "./dist/index.js"
     },
     "./zod": {
-      "types":   "./dist/zod.d.ts",
-      "import":  "./dist/zod.mjs",
+      "types": "./dist/zod.d.ts",
+      "import": "./dist/zod.mjs",
       "require": "./dist/zod.js"
     }
   },
@@ -27,7 +27,7 @@
     "test:watch": "vitest --config vitest.config.ts",
     "typecheck": "tsc --noEmit",
     "bench": "tsx benches/throughput.ts",
-    "bench:credit": "tsx benches/credit.ts",
+    "bench:limit": "tsx benches/limits.ts",
     "bench:chaos": "tsx benches/chaos.ts"
   },
   "peerDependencies": {
