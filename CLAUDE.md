@@ -150,7 +150,7 @@ Frame total = `HEADER_SIZE(16) + msg_len`
 - `RepError`: Header(16) + ref_seq(8) + error_code(2) + _pad(6) = 32B total
 - `Deliver`:  Header(16) + consumer_id(4) + subject_hash(4) + subject_len(2) + _pad(2) + subject + payload
 
-**stream_id** = FNV-1a 32-bit hash of stream name (computed client-side, matches server `wire_hash_32`)
+**stream_id** = server-returned `wire_hash_32` (foldhash). Cached client-side from CreateStream/GetStream RepOk responses. Never computed client-side.
 
 ---
 

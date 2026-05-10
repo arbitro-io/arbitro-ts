@@ -3,7 +3,6 @@ import type { StreamConfig, ConsumerConfig, DeleteStreamOpts, StreamInfo } from 
 import type { Encoding } from '../utils/codec'
 import { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
-import { streamPublish, streamPublishAck, streamPublishBatch, streamRequest } from './publish'
 
 // Stream — context object carrying name + config.
 // No network calls at construction — only at .create(), .upsert(), and .delete().
@@ -51,19 +50,19 @@ export class Stream {
   // ── Publish ─────────────────────────────────────────────────────────────
 
   publish(subject: string, data: Buffer): void {
-    streamPublish(this.client._conn(), this.name, subject, data)
+    this.client.publish(this.name, subject, data)
   }
 
   publishAck(subject: string, data: Buffer): Promise<void> {
-    return streamPublishAck(this.client._conn(), this.name, subject, data)
+    return this.client.publishAck(this.name, subject, data)
   }
 
   publishBatch(messages: [subject: string, data: Buffer][]): void {
-    streamPublishBatch(this.client._conn(), this.name, messages)
+    this.client.publishBatch(this.name, messages)
   }
 
   request(subject: string, data: Buffer, timeoutMs?: number): Promise<Buffer> {
-    return streamRequest(this.client._conn(), this.name, subject, data, timeoutMs ?? this.client.timeout)
+    return this.client.request(this.name, subject, data, timeoutMs)
   }
 
   // ── Context factories ───────────────────────────────────────────────────

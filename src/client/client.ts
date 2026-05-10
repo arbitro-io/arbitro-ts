@@ -3,7 +3,6 @@ import { Subscription } from '../subscription/subscription'
 import { ArbitroError } from '../types/error'
 import { Stream } from '../stream/stream'
 import { Consumer } from '../consumer/consumer'
-import { streamId } from '../proto/fnv1a'
 import { streamPublish, streamPublishAck, streamPublishBatch, streamRequest } from '../stream/publish'
 import {
   packPublish, packCreateStream, packDeleteStream, packGetStream,
@@ -33,6 +32,7 @@ export class ArbitroClient {
   private readonly cfg: typeof DEFAULT_CONFIG
   private readonly tls:    ClientConfig['tls']
   private readonly logger: ClientConfig['logger']
+  private readonly sidCache = new Map<string, number>()
 
   constructor(config: ClientConfig) {
     this.cfg    = { ...DEFAULT_CONFIG, ...config }
@@ -57,24 +57,28 @@ export class ArbitroClient {
 
   // ── Publish (direct to stream via V2 PubFrame) ────────────────────────────
 
-  /** Fire-and-forget publish. Stream resolved by subject → stream_id hash. */
+  /** Fire-and-forget publish. Stream must be created/resolved first. */
   publish(streamName: string, subject: string, data: Buffer): void {
-    streamPublish(this.conn, streamName, subject, data)
+    const sid = this.cachedSid(streamName)
+    streamPublish(this.conn, sid, subject, data)
   }
 
   /** Publish and wait for server confirmation (RepOk). */
   async publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
-    await streamPublishAck(this.conn, streamName, subject, data)
+    const sid = await this.resolveStreamId(streamName)
+    await streamPublishAck(this.conn, sid, subject, data)
   }
 
   /** Batch fire-and-forget — single V2 BatchPubFrame. */
   publishBatch(streamName: string, messages: [subject: string, data: Buffer][]): void {
-    streamPublishBatch(this.conn, streamName, messages)
+    const sid = this.cachedSid(streamName)
+    streamPublishBatch(this.conn, sid, messages)
   }
 
   /** Request-reply. */
   async request(streamName: string, subject: string, data: Buffer, timeoutMs = this.cfg.timeout): Promise<Buffer> {
-    return streamRequest(this.conn, streamName, subject, data, timeoutMs)
+    const sid = await this.resolveStreamId(streamName)
+    return streamRequest(this.conn, sid, subject, data, timeoutMs)
   }
 
   // ── Subscribe ─────────────────────────────────────────────────────────────
@@ -124,11 +128,12 @@ export class ArbitroClient {
     const maxAgeSecs = BigInt(config.maxAgeMs ? Math.ceil(config.maxAgeMs / 1000) : 0)
     const journalKind = journalTypeToU8(config.journal?.type)
 
-    await this.conn.sendExpectReply(packCreateStream(
+    const refSeq = await this.conn.sendExpectReply(packCreateStream(
       this.conn.nextSeq(), nameBuf, filterBuf,
       maxMsgs, maxBytes, maxAgeSecs,
       1, journalKind, 0, 0,
     ))
+    this.sidCache.set(name, Number(refSeq & 0xFFFFFFFFn))
     return new Stream(this, name, config)
   }
 
@@ -136,7 +141,10 @@ export class ArbitroClient {
     try {
       return await this.createStream(name, config)
     } catch (e: any) {
-      if (e?.message?.includes('code=')) return new Stream(this, name, config)
+      if (e?.message?.includes('code=')) {
+        await this.resolveStreamId(name)
+        return new Stream(this, name, config)
+      }
       throw e
     }
   }
@@ -145,6 +153,7 @@ export class ArbitroClient {
     await this.conn.sendExpectReply(
       packDeleteStream(this.conn.nextSeq(), Buffer.from(name)),
     )
+    this.sidCache.delete(name)
   }
 
   async getStreamInfo(name: string): Promise<StreamInfo | null> {
@@ -152,6 +161,7 @@ export class ArbitroClient {
       const refSeq = await this.conn.sendExpectReply(
         packGetStream(this.conn.nextSeq(), Buffer.from(name)),
       )
+      this.sidCache.set(name, Number(refSeq & 0xFFFFFFFFn))
       return { name, config: { subjectFilter: '' }, lastSeq: Number(refSeq) }
     } catch {
       return null
@@ -191,7 +201,7 @@ export class ArbitroClient {
   }
 
   private async createConsumerRaw(streamName: string, config: ConsumerConfig): Promise<number> {
-    const sid  = streamId(streamName)
+    const sid  = await this.resolveStreamId(streamName)
     const name = Buffer.from(config.name ?? streamName)
     const group = Buffer.from(config.name ?? streamName)
     const filter = Buffer.from(config.filter ?? '')
@@ -248,8 +258,9 @@ export class ArbitroClient {
 
   async getConsumerId(streamName: string, name: string): Promise<number | null> {
     try {
+      const sid = await this.resolveStreamId(streamName)
       const refSeq = await this.conn.sendExpectReply(
-        packGetConsumer(this.conn.nextSeq(), streamId(streamName), Buffer.from(name)),
+        packGetConsumer(this.conn.nextSeq(), sid, Buffer.from(name)),
       )
       return Number(refSeq)
     } catch {
@@ -268,7 +279,7 @@ export class ArbitroClient {
   }
 
   async listConsumers(streamName?: string): Promise<ConsumerInfo[]> {
-    const sid = streamName ? streamId(streamName) : 0
+    const sid = streamName ? await this.resolveStreamId(streamName) : 0
     const raw = await this.conn.sendExpectReplyRaw(
       packListConsumers(this.conn.nextSeq(), sid),
     )
@@ -276,6 +287,30 @@ export class ArbitroClient {
   }
 
   // ── Internal helpers ──────────────────────────────────────────────────────
+
+  /** Resolve stream name → server wire_hash_32. Caches the result. */
+  private async resolveStreamId(name: string): Promise<number> {
+    const cached = this.sidCache.get(name)
+    if (cached !== undefined) return cached
+    const refSeq = await this.conn.sendExpectReply(
+      packGetStream(this.conn.nextSeq(), Buffer.from(name)),
+    )
+    const sid = Number(refSeq & 0xFFFFFFFFn)
+    this.sidCache.set(name, sid)
+    return sid
+  }
+
+  /** Get cached stream_id or throw (for sync fire-and-forget paths). */
+  private cachedSid(name: string): number {
+    const sid = this.sidCache.get(name)
+    if (sid === undefined) {
+      throw new ArbitroError(
+        `stream "${name}" not resolved — call createStream/getStreamInfo first`,
+        'protocol',
+      )
+    }
+    return sid
+  }
 
   private async ensureConsumer(streamName: string, config: ConsumerConfig): Promise<number> {
     const name = config.name ?? streamName

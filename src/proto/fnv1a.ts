@@ -1,5 +1,5 @@
-// FNV-1a 32-bit hash — must match arbitro-broker's stream_id().
-// Deterministic, ~1 ns, no deps. Client and broker compute the same hash.
+// FNV-1a 32-bit hash — utility export. NOT used for server stream_id
+// resolution (server uses foldhash). Kept for subject hashing and user code.
 
 export function streamId(name: Buffer | string): number {
   const buf = typeof name === 'string' ? Buffer.from(name) : name
