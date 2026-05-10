@@ -9,7 +9,7 @@ const str = (flag: string, def: string) => { const i = argv.indexOf(flag); retur
 const num = (flag: string, def: number) => { const v = str(flag, ''); return v ? parseInt(v, 10) : def }
 
 const ADDR = str('--addr', '127.0.0.1:9898')
-const CONTAINER = str('--container', 'arbitro-server')
+const CONTAINER = str('--container', 'arbitro-broker')
 const DURATION = num('--duration', 8)
 const RATE = num('--rate', 50)
 const CRASH_AT = num('--crash-at', Math.max(2, Math.floor(DURATION / 2)))
