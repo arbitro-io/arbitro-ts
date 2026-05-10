@@ -157,10 +157,12 @@ describe('V2 Consumer management frames', () => {
       deliverPolicy: 0,
       ackWaitMs: 30000,
       startSeq: 0n,
+      maxSubjectInflight: 64,
     })
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateConsumer)
     expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(7)  // stream_id
     expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(128)  // max_inflight
+    expect(frame.readUInt32LE(HEADER_SIZE + 28)).toBe(64)  // max_subject_inflight
   })
 
   it('DeleteConsumer encodes consumer_id', () => {

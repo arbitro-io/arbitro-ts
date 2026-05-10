@@ -54,7 +54,7 @@ async function runScenario(maxCredit: number | null): Promise<void> {
         ackPolicy: AckPolicy.Explicit,
         deliverPolicy: DeliverPolicy.All,
         maxAckPending: 20_000,
-        creditRules: [{ pattern: '*.msg', limit: maxCredit }],
+        maxSubjectInflight: maxCredit,
       }
     : {
         name: consumer,

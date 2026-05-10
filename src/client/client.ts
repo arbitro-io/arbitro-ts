@@ -207,6 +207,7 @@ export class ArbitroClient {
       deliverMode:   config.fanout ? 1 : 0,
       ackWaitMs:     config.ackWaitMs ?? 0,
       startSeq:      BigInt(config.startSeq ?? 0),
+      maxSubjectInflight: config.maxSubjectInflight ?? 0,
     }
 
     const refSeq = await this.conn.sendExpectReply(

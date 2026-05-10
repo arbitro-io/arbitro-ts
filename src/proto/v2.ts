@@ -300,7 +300,8 @@ export function packListStreams(seq: bigint, offset = 0, limit = 1000): Buffer {
 }
 
 // ── CreateConsumer (0x0501) ─────────────────────────────────────────────
-// Body(28B): name_len(2)+subj_len(2)+stream_id(4)+max_inflight(2)+ack_policy(1)+deliver_policy(1)+deliver_mode(1)+_pad(1)+group_len(2)+ack_wait_ms(4)+start_seq(8)
+// Body(32B): name_len(2)+subj_len(2)+stream_id(4)+max_inflight(2)+ack_policy(1)+deliver_policy(1)
+//            +deliver_mode(1)+_pad(1)+group_len(2)+ack_wait_ms(4)+start_seq(8)+max_subject_inflight(4)
 
 export interface CreateConsumerOpts {
   streamId:      number
@@ -313,10 +314,11 @@ export interface CreateConsumerOpts {
   deliverMode?:  number
   ackWaitMs?:    number
   startSeq?:     bigint
+  maxSubjectInflight?: number
 }
 
 export function packCreateConsumer(seq: bigint, opts: CreateConsumerOpts): Buffer {
-  const bodyFixed = 28
+  const bodyFixed = 32
   const { name, group, filter, streamId } = opts
   const msgLen = bodyFixed + name.length + group.length + filter.length
   const buf = Buffer.allocUnsafe(HEADER_SIZE + msgLen)
@@ -333,6 +335,7 @@ export function packCreateConsumer(seq: bigint, opts: CreateConsumerOpts): Buffe
   buf.writeUInt16LE(group.length, off); off += 2
   buf.writeUInt32LE(opts.ackWaitMs ?? 0, off); off += 4
   buf.writeBigUInt64LE(opts.startSeq ?? 0n, off); off += 8
+  buf.writeUInt32LE(opts.maxSubjectInflight ?? 0, off); off += 4
   name.copy(buf, off); off += name.length
   group.copy(buf, off); off += group.length
   filter.copy(buf, off)

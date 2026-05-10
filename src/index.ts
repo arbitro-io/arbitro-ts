@@ -21,7 +21,6 @@ export type {
   ConsumerInfo,
   JournalConfig,
   FlushConfig,
-  CreditRule,
   DeleteStreamOpts,
   SubscribeOptions,
   ReconnectConfig,

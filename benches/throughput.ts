@@ -310,7 +310,7 @@ async function runCreditScenario(label: string, maxCredit: number | null): Promi
 
   const consumerCfg = maxCredit !== null
     ? { name: consumer, filter: subject, maxAckPending: 20_000, deliverPolicy: DeliverPolicy.All,
-        creditRules: [{ pattern: '*.msg', limit: maxCredit }] }
+        maxSubjectInflight: maxCredit }
     : { name: consumer, filter: subject, maxAckPending: 20_000, deliverPolicy: DeliverPolicy.All }
 
   let received = 0

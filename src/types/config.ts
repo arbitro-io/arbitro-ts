@@ -29,11 +29,6 @@ export type JournalConfig =
   | { type: JournalType.Tolerant }
   | { type: JournalType.Strict; flush?: FlushConfig }
 
-export interface CreditRule {
-  pattern: string
-  limit:   number
-}
-
 export interface StreamConfig {
   subjectFilter:  string
   journal?:       JournalConfig
@@ -65,7 +60,8 @@ export interface ConsumerConfig {
   ackWaitMs?:           number
   maxDeliver?:          number
   removeUnusedAfterMs?: number
-  creditRules?:         CreditRule[]
+  /** Per-subject max inflight (0 = unlimited). Replaces the old credit_rules. */
+  maxSubjectInflight?:  number
 }
 
 export interface ConsumerInfo {
