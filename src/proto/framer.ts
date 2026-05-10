@@ -1,9 +1,14 @@
-import { HEADER_SIZE, OFF_MSG_LEN } from './constants'
+import { HEADER_SIZE, OFF_ACTION, OFF_MSG_LEN, Action } from './constants'
 
 type FrameCallback = (frame: Buffer) => void
 
+// Envelope header (RepBatch/FanoutBatch): msg_len lives at offset 8, not 4.
+const ENVELOPE_MSG_LEN_OFF = 8
+
 // Accumulates incoming TCP bytes and emits complete V2 frames.
-// A frame is: Header(16B) + body(msg_len bytes).
+// Server uses two header layouts:
+//   Standard: action(2)+flags(1)+eflags(1)+msg_len(4)+seq(8)
+//   Envelope: action(2)+flags(1)+eflags(1)+stream_id(4)+msg_len(4)+env_seq(4)
 export class Framer {
   private buf = Buffer.allocUnsafe(65_536)
   private pos = 0
@@ -16,7 +21,10 @@ export class Framer {
     let offset = 0
     while (offset < this.pos) {
       if (this.pos - offset < HEADER_SIZE) break
-      const msgLen   = this.buf.readUInt32LE(offset + OFF_MSG_LEN)
+      const action = this.buf.readUInt16LE(offset + OFF_ACTION)
+      const msgLen = action === Action.RepBatch || action === Action.FanoutBatch
+        ? this.buf.readUInt32LE(offset + ENVELOPE_MSG_LEN_OFF)
+        : this.buf.readUInt32LE(offset + OFF_MSG_LEN)
       const frameLen = HEADER_SIZE + msgLen
       if (this.pos - offset < frameLen) break
       onFrame(Buffer.from(this.buf.subarray(offset, offset + frameLen)))

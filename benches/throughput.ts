@@ -185,6 +185,7 @@ async function runPubSub(): Promise<void> {
     if (received >= MSGS) subEnd = process.hrtime.bigint()
   })
 
+  await pubClient.resolveStream(stream)
   const pubStream = pubClient.stream(stream)
   const payload   = Buffer.alloc(SIZE, 0x42)
   const pubStart  = process.hrtime.bigint()
@@ -280,6 +281,7 @@ async function runPubMt(): Promise<void> {
   console.log('  ┌── Multi-thread publish results ─────────────────────────────┐')
   for (const n of [1, 2, 4]) {
     const clients = await Promise.all(Array.from({ length: n }, () => connect()))
+    await Promise.all(clients.map((c) => c.resolveStream(stream)))
     const perClient = Math.max(1, Math.floor(MSGS / n))
     const t0 = process.hrtime.bigint()
     await Promise.all(clients.map(async (client) => {
@@ -318,6 +320,7 @@ async function runCreditScenario(label: string, maxCredit: number | null): Promi
   const sub = await subClient.subscribe(stream, consumerCfg, (msg) => { msg.ack(); received++ })
 
   const pubClient = await connect()
+  await pubClient.resolveStream(stream)
   const pubStream = pubClient.stream(stream)
   const payload   = Buffer.alloc(SIZE, 0x42)
   const t0        = process.hrtime.bigint()
@@ -366,6 +369,7 @@ async function runLat(): Promise<void> {
     resolve?.()
   })
 
+  await pubClient.resolveStream(stream)
   const pubStream = pubClient.stream(stream)
   const payload   = Buffer.alloc(SIZE, 0x42)
   for (let i = 0; i < MSGS; i++) {
@@ -408,6 +412,7 @@ async function runReplay(ackMode: boolean): Promise<void> {
     ackPolicy: ackMode ? AckPolicy.Explicit : AckPolicy.None,
     maxAckPending: ackMode ? Math.max(50_000, Math.floor(MSGS / 5)) : undefined,
   }
+  await pubClient.resolveStream(stream)
   const pubStream = pubClient.stream(stream)
   const payload = Buffer.alloc(SIZE, 0x42)
   const preloadStart = process.hrtime.bigint()
@@ -485,6 +490,7 @@ async function runPerf(): Promise<void> {
     msg.ack()
   })
 
+  await pubClient.resolveStream(stream)
   const pubStream = pubClient.stream(stream)
   const payload = Buffer.alloc(Math.max(SIZE, 8), 0x42)
   const start = process.hrtime.bigint()

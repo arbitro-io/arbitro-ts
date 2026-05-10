@@ -71,6 +71,7 @@ async function runScenario(maxCredit: number | null): Promise<void> {
   })
 
   const payload = Buffer.alloc(SIZE, 0x42)
+  await pubClient.resolveStream(stream)
   const t0 = process.hrtime.bigint()
   for (let i = 0; i < MSGS; i++) pubClient.publish(stream, subject, payload)
 

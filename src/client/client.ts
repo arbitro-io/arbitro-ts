@@ -321,6 +321,11 @@ export class ArbitroClient {
 
   // ── Domain helpers ────────────────────────────────────────────────────────
 
+  /** Pre-resolve stream_id from server (GetStream). Required before sync publish(). */
+  async resolveStream(name: string): Promise<void> {
+    await this.resolveStreamId(name)
+  }
+
   stream(name: string, config?: StreamConfig): Stream {
     return new Stream(this, name, config)
   }

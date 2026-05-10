@@ -152,40 +152,47 @@ export class Connection {
   }
 
   private handleBatchDeliver(frame: Buffer): void {
-    // Header(16) + DeliverBatchHeader(8) + entries
-    if (frame.length < HEADER_SIZE + 8) return
-    const consumerId = frame.readUInt32LE(HEADER_SIZE)
-    const count      = frame.readUInt32LE(HEADER_SIZE + 4)
-    const handler    = this.routes.get(consumerId)
-    if (!handler) return
+    // Envelope(16) + RepBatchFixed(4) + N × entries
+    // RepBatchFixed: count(u16) + pad(u16)
+    if (frame.length < HEADER_SIZE + 4) return
+    const count = frame.readUInt16LE(HEADER_SIZE)
+    let off = HEADER_SIZE + 4
 
-    // Each entry: DeliverBatchEntry(16B) + subject + payload
-    let off = HEADER_SIZE + 8
+    // Each entry: DeliveryEntryHeader(24B) + tail(data_len bytes)
+    //   consumer_id(4) + seq(8) + subj_len(2) + reply_len(2) + data_len(4) + subject_hash(4)
+    // data_len = subj_len + reply_len + payload_len (combined tail)
     for (let i = 0; i < count; i++) {
-      if (off + 16 > frame.length) break
-      const deliverSeq  = frame.readBigUInt64LE(off)
-      const subjectHash = frame.readUInt32LE(off + 8)
+      if (off + 24 > frame.length) break
+      const consumerId  = frame.readUInt32LE(off)
+      const deliverSeq  = frame.readBigUInt64LE(off + 4)
       const subjectLen  = frame.readUInt16LE(off + 12)
-      const payloadLen  = frame.readUInt16LE(off + 14)
-      off += 16
+      const replyLen    = frame.readUInt16LE(off + 14)
+      const dataLen     = frame.readUInt32LE(off + 16)
+      const subjectHash = frame.readUInt32LE(off + 20)
+      off += 24
 
-      // Synthesize a single-delivery frame for the handler
-      const singleSize = HEADER_SIZE + 12 + subjectLen + payloadLen
-      const single = Buffer.allocUnsafe(singleSize)
-      // Write header: action=Deliver, msg_len, seq=deliverSeq
-      single.writeUInt16LE(Action.Deliver, 0)
-      single[2] = 0; single[3] = 0
-      single.writeUInt32LE(12 + subjectLen + payloadLen, 4)
-      single.writeBigUInt64LE(deliverSeq, 8)
-      // Write body
-      single.writeUInt32LE(consumerId, HEADER_SIZE)
-      single.writeUInt32LE(subjectHash, HEADER_SIZE + 4)
-      single.writeUInt16LE(subjectLen, HEADER_SIZE + 8)
-      single.writeUInt16LE(0, HEADER_SIZE + 10)
-      // Copy subject + payload
-      frame.copy(single, HEADER_SIZE + 12, off, off + subjectLen + payloadLen)
-      off += subjectLen + payloadLen
-      handler(single)
+      const tailEnd    = off + dataLen
+      if (tailEnd > frame.length) break
+      const payloadLen = dataLen - subjectLen - replyLen
+
+      const handler = this.routes.get(consumerId)
+      if (handler) {
+        // Synthesize a single Deliver frame for the subscription
+        const bodyLen = 12 + subjectLen + payloadLen
+        const single  = Buffer.allocUnsafe(HEADER_SIZE + bodyLen)
+        single.writeUInt16LE(Action.Deliver, 0)
+        single[2] = 0; single[3] = 0
+        single.writeUInt32LE(bodyLen, 4)
+        single.writeBigUInt64LE(deliverSeq, 8)
+        single.writeUInt32LE(consumerId, HEADER_SIZE)
+        single.writeUInt32LE(subjectHash, HEADER_SIZE + 4)
+        single.writeUInt16LE(subjectLen, HEADER_SIZE + 8)
+        single.writeUInt16LE(0, HEADER_SIZE + 10)
+        frame.copy(single, HEADER_SIZE + 12, off, off + subjectLen)
+        frame.copy(single, HEADER_SIZE + 12 + subjectLen, off + subjectLen + replyLen, tailEnd)
+        handler(single)
+      }
+      off = tailEnd
     }
   }
 
