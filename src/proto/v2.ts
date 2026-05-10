@@ -327,7 +327,7 @@ export function packCreateConsumer(seq: bigint, opts: CreateConsumerOpts): Buffe
   buf.writeUInt16LE(name.length, off); off += 2
   buf.writeUInt16LE(filter.length, off); off += 2
   buf.writeUInt32LE(streamId, off); off += 4
-  buf.writeUInt16LE(opts.maxInflight ?? 0, off); off += 2
+  buf.writeUInt16LE(Math.min(opts.maxInflight ?? 0, 0xFFFF), off); off += 2
   buf[off++] = opts.ackPolicy ?? 1       // 1 = Explicit
   buf[off++] = opts.deliverPolicy ?? 0   // 0 = All
   buf[off++] = opts.deliverMode ?? 0
