@@ -82,7 +82,7 @@ async function createBenchStream(client: ArbitroClient, name: string): Promise<S
 }
 
 async function cleanup(admin: ArbitroClient, consumer: string, stream: string): Promise<void> {
-  try { await admin.deleteConsumer(consumer) } catch {}
+  try { await admin.deleteConsumer(stream, consumer) } catch {}
   try { await admin.deleteStream(stream) } catch {}
   await admin.close()
 }
@@ -333,7 +333,7 @@ async function runCreditScenario(label: string, maxCredit: number | null): Promi
 
   sub.close()
   await Promise.all([subClient.close(), pubClient.close()])
-  admin.deleteConsumer(consumer)
+  admin.deleteConsumer(stream, consumer)
   admin.deleteStream(stream)
   await admin.close()
 }

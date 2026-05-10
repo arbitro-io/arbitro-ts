@@ -26,7 +26,7 @@ function unique(prefix: string): { stream: string, subject: string, consumer: st
 }
 
 async function cleanup(admin: ArbitroClient, consumer: string, stream: string): Promise<void> {
-  try { await admin.deleteConsumer(consumer) } catch {}
+  try { await admin.deleteConsumer(stream, consumer) } catch {}
   try { await admin.deleteStream(stream) } catch {}
   await admin.close()
 }

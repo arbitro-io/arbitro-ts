@@ -62,7 +62,7 @@ async function waitForBroker(): Promise<void> {
 }
 
 async function cleanup(admin: ArbitroClient, consumer: string, stream: string): Promise<void> {
-  try { await admin.deleteConsumer(consumer) } catch {}
+  try { await admin.deleteConsumer(stream, consumer) } catch {}
   try { await admin.deleteStream(stream) } catch {}
   await admin.close()
 }
@@ -122,7 +122,7 @@ async function main(): Promise<void> {
         await waitForBroker()
         const verify = await connect()
         const streamOk = await verify.streamExists(stream)
-        const consumerOk = await verify.consumerExists(consumer)
+        const consumerOk = await verify.consumerExists(stream, consumer)
         console.log(`  restart   : stream=${streamOk} consumer=${consumerOk}`)
         await verify.close()
         crashed = true
