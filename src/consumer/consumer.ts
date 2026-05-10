@@ -1,5 +1,5 @@
 import type { ArbitroClient } from '../client/client'
-import type { ConsumerConfig, SubscribeOptions, ConsumerInfo } from '../types/config'
+import type { ConsumerConfig, SubscribeOptions } from '../types/config'
 import type { Subscription } from '../subscription/subscription'
 import type { Message } from '../message/message'
 import type { Encoding } from '../utils/codec'
@@ -8,41 +8,42 @@ import { streamPublish } from '../stream/publish'
 
 type RawCallback = (msg: Message) => void
 
-// Consumer — thin context wrapper that carries streamName + config.
+// Consumer — thin context wrapper that carries streamName + config + consumerId.
 // No network calls at construction — only at .create() and .subscribe().
 export class Consumer {
   constructor(
     private readonly client:     ArbitroClient,
     readonly streamName: string,
     readonly config:     ConsumerConfig,
+    private _consumerId?: number,
   ) {}
 
   get name(): string { return this.config.name ?? this.streamName }
+  get consumerId(): number | undefined { return this._consumerId }
 
   publish(subject: string, data: Buffer): void {
     streamPublish(this.client._conn(), this.streamName, subject, data)
   }
 
   async create(): Promise<this> {
-    await this.client.createConsumer(this.streamName, this.config)
+    const result = await this.client.createConsumer(this.streamName, this.config)
+    this._consumerId = result.consumerId
     return this
   }
 
   async upsert(): Promise<this> {
-    await this.client.upsertConsumer(this.streamName, this.config)
+    const result = await this.client.upsertConsumer(this.streamName, this.config)
+    this._consumerId = result.consumerId
     return this
   }
 
   async delete(): Promise<void> {
-    await this.client.deleteConsumer(this.name)
+    if (this._consumerId == null) throw new Error('consumer not created')
+    await this.client.deleteConsumer(this._consumerId)
   }
 
   async exists(): Promise<boolean> {
-    return this.client.consumerExists(this.name)
-  }
-
-  async info(): Promise<ConsumerInfo | null> {
-    return this.client.getConsumerInfo(this.name)
+    return this.client.consumerExists(this.streamName, this.name)
   }
 
   // Raw subscribe — Message with manual ack/nack/decode.
@@ -61,13 +62,20 @@ export class Consumer {
     opts?: SubscribeOptions,
   ): Promise<Subscription> {
     if (!codecOrCb || typeof codecOrCb === 'function') {
-      return this.client.subscribe(this.streamName, this.config, codecOrCb as RawCallback | undefined, cbOrOpts as SubscribeOptions | undefined)
+      return this.client.subscribe(
+        this.streamName, this.config,
+        codecOrCb as RawCallback | undefined,
+        cbOrOpts as SubscribeOptions | undefined,
+      )
     }
     const codec  = codecOrCb
     const cb     = cbOrOpts as (msg: LazyMessage<T>) => void
     const fields = codec.fields ?? []
     return this.client.subscribe(this.streamName, this.config, (raw) => {
-      cb(makeLazyMessage(raw.data(), codec, fields, () => raw.ack(), () => raw.nack(), (ms) => raw.nackDelay(ms)))
+      cb(makeLazyMessage(
+        raw.data(), codec, fields,
+        () => raw.ack(), () => raw.nack(), (ms) => raw.nackDelay(ms),
+      ))
     }, opts)
   }
 }

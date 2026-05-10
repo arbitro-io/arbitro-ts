@@ -24,7 +24,7 @@ describe('Consumer delivery', () => {
     const consumer = await stream.consumer({ name }).create()
     const received: LazyMessage<Order>[] = []
     const sub = await consumer.subscribe(OrderCodec, (msg: LazyMessage<Order>) => received.push(msg))
-    await client.publishAck(`${name}.new`, OrderCodec.encode({ id: 42, status: 'pending' }))
+    await client.publishAck(name, `${name}.new`, OrderCodec.encode({ id: 42, status: 'pending' }))
     await waitUntil(() => received.length >= 1)
     sub.close()
 
@@ -42,7 +42,7 @@ describe('Consumer delivery', () => {
     const received: Buffer[] = []
     const sub = await consumer.subscribe((msg) => received.push(msg.data()))
 
-    await client.publishAck(`${name}.e`, Buffer.from('raw-bytes'))
+    await client.publishAck(name, `${name}.e`, Buffer.from('raw-bytes'))
     await waitUntil(() => received.length >= 1)
     sub.close()
 
@@ -60,7 +60,7 @@ describe('Consumer delivery', () => {
     const sub = await consumer.subscribe((msg) => received.push(msg.data().toString()))
 
     for (let i = 0; i < 5; i++) {
-      await client.publishAck(`${name}.e`, Buffer.from(`msg-${i}`))
+      await client.publishAck(name, `${name}.e`, Buffer.from(`msg-${i}`))
     }
     await waitUntil(() => received.length >= 5)
     sub.close()
@@ -86,8 +86,8 @@ describe('Consumer delivery', () => {
       msg.ack()
     })
 
-    await client.publishAck(`${name}.e`, Buffer.from('first'))
-    await client.publishAck(`${name}.e`, Buffer.from('second'))
+    await client.publishAck(name, `${name}.e`, Buffer.from('first'))
+    await client.publishAck(name, `${name}.e`, Buffer.from('second'))
     await waitUntil(() => received.length >= 2)
     sub.close()
 
@@ -103,8 +103,8 @@ describe('Consumer delivery', () => {
     const consumer = await stream.consumer({ name }).create()
     const sub = await consumer.subscribe()
 
-    await client.publishAck(`${name}.e`, Buffer.from('pull-a'))
-    await client.publishAck(`${name}.e`, Buffer.from('pull-b'))
+    await client.publishAck(name, `${name}.e`, Buffer.from('pull-a'))
+    await client.publishAck(name, `${name}.e`, Buffer.from('pull-b'))
 
     const msgs = await sub.fetch(2, 2_000)
     sub.close()

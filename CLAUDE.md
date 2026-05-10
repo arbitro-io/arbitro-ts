@@ -10,7 +10,7 @@ Inherits all rules from the root `CLAUDE.md` — every rule there applies here w
 - **Runtime**: Node.js ≥ 20
 - **Build**: tsup (esbuild) — CJS + ESM + `.d.ts`
 - **Tests**: vitest
-- **Serialization**: msgpackr for ConsumerConfig/StreamConfig + Codec<T>
+- **Serialization**: Binary V2 frames (zerocopy structs) + Codec<T> (msgpack) for user payloads
 - **TCP**: `net.Socket` with `setNoDelay(true)` — no Nagle algorithm
 - **u64**: always `bigint` — never `number` for sequence numbers
 
@@ -97,19 +97,60 @@ Encoding<T>                    ← interface — encode(T): Buffer, decode(Buffe
 
 ---
 
-## WIRE CONTRACT
+## WIRE CONTRACT — V2
 
-Header: 32 bytes, little-endian
+**Handshake (client→server, first 8 bytes on connect):**
 ```
-magic(4) | version(1) | flags(1) | action(2) | crc32c(4) | length(4) | sequence(8) | timestamp(8)
+magic(4) "ARB2" (0x32425241 LE) | version(1)=2 | role(1)=0 (client) | caps(2)=0
 ```
-Payload: `u16_le(subject_len) + subject_bytes + data_bytes`
 
-**Immutable constants:**
-- `MAGIC = 0xA1B2_C3D4`, `VERSION = 0x02`
-- All action codes must match `arbitro-proto/src/action.rs`
-- CRC32c covers full frame with crc field zeroed (Castagnoli 0x82F63B78)
-- Subject on wire is always raw bytes — never UTF-8 validated on hot path
+**Frame Header: 16 bytes, little-endian**
+```
+action(2) | flags(1) | entry_flags(1) | msg_len(4) | seq(8)
+```
+Frame total = `HEADER_SIZE(16) + msg_len`
+
+**Key constants (must match `arbitro-proto`):**
+- `HEADER_SIZE = 16`, `MAGIC_V2 = 0x32425241`, `HELLO_SIZE = 8`
+- `OFF_ACTION = 0`, `OFF_FLAGS = 2`, `OFF_ENTRY_FLAGS = 3`, `OFF_MSG_LEN = 4`, `OFF_SEQ = 8`
+- `Flag.AckReq = 0x01` — publisher requests RepOk confirmation
+
+**Action codes (u16 LE):**
+| Code     | Action          | Direction |
+|----------|-----------------|-----------|
+| 0x0101   | Publish         | C→S       |
+| 0x0103   | PublishBatch    | C→S       |
+| 0x0104   | PublishWithReply| C→S       |
+| 0x0201   | Ack             | C→S (fire-and-forget) |
+| 0x0202   | Nack            | C→S (fire-and-forget) |
+| 0x0206   | BatchAck        | C→S (fire-and-forget) |
+| 0x020A   | BatchNack       | C→S (fire-and-forget) |
+| 0x0301   | Subscribe       | C→S       |
+| 0x0302   | Unsubscribe     | C→S       |
+| 0x0401   | CreateStream    | C→S       |
+| 0x0402   | DeleteStream    | C→S       |
+| 0x0403   | GetStream       | C→S       |
+| 0x0404   | ListStreams     | C→S       |
+| 0x0405   | PurgeStream     | C→S       |
+| 0x0406   | DrainSubject    | C→S       |
+| 0x0501   | CreateConsumer  | C→S       |
+| 0x0502   | DeleteConsumer  | C→S       |
+| 0x0503   | GetConsumer     | C→S       |
+| 0x0504   | ListConsumers   | C→S       |
+| 0x0601   | Ping            | C→S       |
+| 0x0602   | Pong            | S→C       |
+| 0x0605   | Disconnect      | C→S       |
+| 0x0701   | RepOk           | S→C       |
+| 0x0702   | RepError        | S→C       |
+| 0x0703   | Deliver         | S→C       |
+| 0x0704   | RepBatch        | S→C       |
+
+**Server replies:**
+- `RepOk`:    Header(16) + ref_seq(8) = 24B total
+- `RepError`: Header(16) + ref_seq(8) + error_code(2) + _pad(6) = 32B total
+- `Deliver`:  Header(16) + consumer_id(4) + subject_hash(4) + subject_len(2) + _pad(2) + subject + payload
+
+**stream_id** = FNV-1a 32-bit hash of stream name (computed client-side, matches server `wire_hash_32`)
 
 ---
 

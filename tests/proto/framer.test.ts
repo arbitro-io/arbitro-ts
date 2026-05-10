@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { Framer } from '../../src/proto/framer'
-import { pack } from '../../src/proto/codec'
-import { Action } from '../../src/proto/constants'
+import { packPublish } from '../../src/proto/v2'
 
 function makeFrame(): Buffer {
-  return pack({ action: Action.PubPublish, seq: 1n, subject: 'test', data: Buffer.from('payload') })
+  return packPublish(1n, 0xCAFE, Buffer.from('test'), Buffer.from('payload'))
 }
 
 describe('framer', () => {
@@ -42,5 +41,11 @@ describe('framer', () => {
       framer.push(Buffer.from([byte]), (f) => frames.push(f))
     }
     expect(frames.length).toBe(1)
+  })
+
+  it('frame length = HEADER_SIZE + msg_len', () => {
+    const frame = makeFrame()
+    const msgLen = frame.readUInt32LE(4)  // OFF_MSG_LEN = 4
+    expect(frame.length).toBe(16 + msgLen)
   })
 })

@@ -1,78 +1,85 @@
-import { OFF_FLAGS, OFF_SEQUENCE, OFF_CRC32C, OFF_LENGTH, HEADER_SIZE } from '../proto/constants'
-import { Flags } from '../proto/constants'
+import { HEADER_SIZE, OFF_SEQ } from '../proto/constants'
+import { packAck, packNack, packBatchNack } from '../proto/v2'
 
-// RepMessage layout:
-//   crc32c  (offset 8,  u32) = topic_len
-//   length  (offset 12, u32) = payload_len
-//   flags   (offset 5,  u8)  = preserves REPLY_TO from original publish
-//   sequence(offset 16, u64) = journal seq
-//   timestamp(offset 24, u64) = sub_id
-//   after 32-byte header: topic_bytes (topic_len) + payload_bytes (payload_len)
+// V2 Deliver frame layout:
+//   Header(16B) + DeliverBody(12B) + tail[subject + payload]
 //
-// When REPLY_TO flag is set, payload = [u16_le rto_len][reply_to bytes][user data]
-// When REPLY_TO flag is not set, payload = [user data]
+// DeliverBody offsets (relative to HEADER_SIZE):
+//   0:  consumer_id   u32
+//   4:  subject_hash  u32
+//   8:  subject_len   u16
+//   10: _pad          u16
+
+const BODY_OFF       = HEADER_SIZE
+const BODY_SIZE      = 12
+const TAIL_OFF       = HEADER_SIZE + BODY_SIZE
+const OFF_CONSUMER   = BODY_OFF
+const OFF_SUBJ_HASH  = BODY_OFF + 4
+const OFF_SUBJ_LEN   = BODY_OFF + 8
+
+type SendFn = (frame: Buffer) => void
 
 export class Message {
-  private _topicLen: number | undefined
-  private _payloadStart: number | undefined
+  private readonly frame: Buffer
+  private readonly send:  SendFn
+  private readonly seqFn: () => bigint
+  private _subjectLen: number | undefined
 
-  constructor(
-    private readonly frame:  Buffer,
-    readonly subId:          bigint,
-    private readonly _ack:   () => void,
-    private readonly _nack:  () => void,
-    private readonly _nackDelayFn: (ms: number) => void,
-    private readonly _reply?: (data: Buffer) => void,
-  ) {}
-
-  private topicLen(): number {
-    return this._topicLen ??= this.frame.readUInt32LE(OFF_CRC32C)
+  constructor(frame: Buffer, send: SendFn, seqFn: () => bigint) {
+    this.frame = frame
+    this.send  = send
+    this.seqFn = seqFn
   }
 
-  /** Start offset of payload bytes (after header + topic) */
-  private payloadOff(): number {
-    return HEADER_SIZE + this.topicLen()
-  }
-
-  /** Start offset of user data within the frame (skips reply_to prefix if present) */
-  private dataOff(): number {
-    if (this._payloadStart !== undefined) return this._payloadStart
-    const off = this.payloadOff()
-    if (!this.hasReplyTo() || off + 2 > this.frame.length) {
-      this._payloadStart = off
-    } else {
-      const rtoLen = this.frame.readUInt16LE(off)
-      this._payloadStart = off + 2 + rtoLen
-    }
-    return this._payloadStart
-  }
-
-  subject(): Buffer {
-    return this.frame.subarray(HEADER_SIZE, HEADER_SIZE + this.topicLen())
-  }
-
-  data(): Buffer {
-    return this.frame.subarray(this.dataOff())
-  }
-
+  /** Delivery sequence — used to ack/nack this message. */
   seq(): bigint {
-    return this.frame.readBigUInt64LE(OFF_SEQUENCE)
+    return this.frame.readBigUInt64LE(OFF_SEQ)
   }
 
-  hasReplyTo(): boolean { return (this.frame[OFF_FLAGS]! & Flags.ReplyTo) !== 0 }
-
-  replyTo(): Buffer | undefined {
-    if (!this.hasReplyTo()) return undefined
-    const off = this.payloadOff()
-    if (off + 2 > this.frame.length) return undefined
-    const rtoLen = this.frame.readUInt16LE(off)
-    if (off + 2 + rtoLen > this.frame.length) return undefined
-    return this.frame.subarray(off + 2, off + 2 + rtoLen)
+  /** Consumer ID that received this delivery. */
+  consumerId(): number {
+    return this.frame.readUInt32LE(OFF_CONSUMER)
   }
 
-  ack():  void { this._ack() }
-  nack(): void { this._nack() }
-  nackDelay(delayMs: number): void { this._nackDelayFn(delayMs) }
+  /** Subject hash — echoed back in ack for O(1) credit release. */
+  subjectHash(): number {
+    return this.frame.readUInt32LE(OFF_SUBJ_HASH)
+  }
 
-  reply(data: Buffer): void { this._reply?.(data) }
+  private subjLen(): number {
+    return this._subjectLen ??= this.frame.readUInt16LE(OFF_SUBJ_LEN)
+  }
+
+  /** Zero-copy view of the subject bytes. */
+  subject(): Buffer {
+    return this.frame.subarray(TAIL_OFF, TAIL_OFF + this.subjLen())
+  }
+
+  /** Zero-copy view of the payload bytes. */
+  data(): Buffer {
+    return this.frame.subarray(TAIL_OFF + this.subjLen())
+  }
+
+  /** Acknowledge — fire-and-forget to broker. */
+  ack(): void {
+    this.send(packAck(
+      this.seqFn(), this.consumerId(), this.subjectHash(), this.seq(),
+    ))
+  }
+
+  /** Negative acknowledge — immediate requeue. */
+  nack(): void {
+    this.send(packNack(
+      this.seqFn(), this.consumerId(), this.subjectHash(), this.seq(),
+    ))
+  }
+
+  /** Negative acknowledge with redelivery delay (ms). */
+  nackDelay(ms: number): void {
+    // Single nack frame has no delay field — use BatchNack with 1 entry.
+    this.send(packBatchNack(
+      this.seqFn(), this.consumerId(),
+      [{ seq: this.seq(), subjectHash: this.subjectHash(), delayMs: ms }],
+    ))
+  }
 }

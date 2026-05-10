@@ -1,35 +1,27 @@
 import * as net from 'net'
 import * as tls from 'tls'
-import { Unpackr } from 'msgpackr'
 import { Framer } from '../proto/framer'
-import { pack } from '../proto/codec'
+import { packHello, packSubscribe, packUnsubscribe, packDisconnect } from '../proto/v2'
 import {
-  Action, Flags,
-  HEADER_SIZE, OFF_SEQUENCE, OFF_TIMESTAMP,
+  Action, HEADER_SIZE, OFF_ACTION, OFF_SEQ, OFF_MSG_LEN,
 } from '../proto/constants'
-import { ArbitroError, type BrokerError } from '../types/error'
+import { ArbitroError } from '../types/error'
 import type { TlsConfig, ReconnectConfig } from '../types/config'
 import { resolveLogger } from '../common/logger'
 import type { Logger } from '../common/logger'
 
 type DeliveryHandler = (frame: Buffer) => void
-const unpackr = new Unpackr({ structuredClone: false, useRecords: false })
 
 interface PendingMgmt {
   resolve: (frame: Buffer) => void
   reject:  (err: Error) => void
 }
 
-interface PendingRequest {
-  resolve: (frame: Buffer) => void
-  reject:  (err: Error) => void
-}
-
 interface ActiveSubscription {
-  streamName: string
-  configData: Buffer
+  consumerId: number
+  filter:     Buffer
   handler:    DeliveryHandler
-  onRenew:    ((newSubId: bigint) => void) | undefined
+  onRenew:    ((newConsumerId: number) => void) | undefined
 }
 
 function parseAddr(addr: string): { host: string; port: number } {
@@ -41,14 +33,14 @@ function parseAddr(addr: string): { host: string; port: number } {
 
 export class Connection {
   private seq             = 1n
+  private connId          = 0
   private framer          = new Framer()
-  private routes          = new Map<bigint, DeliveryHandler>()
+  private routes          = new Map<number, DeliveryHandler>()  // consumer_id → handler
   private mgmtQ:          PendingMgmt[]                    = []
-  private pendingRequests = new Map<bigint, PendingRequest>()
   private socket:         net.Socket
   private closing         = false
   private readonly log:   Logger
-  private activeSubs      = new Map<bigint, ActiveSubscription>()
+  private activeSubs      = new Map<number, ActiveSubscription>()
 
   private constructor(
     socket: net.Socket,
@@ -85,7 +77,9 @@ export class Connection {
       const done = (socket: net.Socket) => {
         clearTimeout(timer)
         const conn = new Connection(socket, parsed, reconnectCfg, logger)
-        conn.log.info({ host, port }, 'arbitro connected')
+        // V2 handshake: send HelloFrame immediately after TCP connect.
+        socket.write(packHello())
+        conn.log.info({ host, port }, 'arbitro connected (v2)')
         resolve(conn)
       }
       const fail = (e: Error) => { clearTimeout(timer); reject(e) }
@@ -111,120 +105,148 @@ export class Connection {
   nextSeq(): bigint { return this.seq++ }
 
   // ── Frame routing ─────────────────────────────────────────────────────────
+  // V2 dispatch: switch on action (jump table). O(1).
 
   private onFrame(frame: Buffer): void {
-    // switch compiles to a jump table in V8 — O(1) dispatch regardless of action.
-    switch (frame.readUInt16LE(6) as Action) {
+    const action = frame.readUInt16LE(OFF_ACTION) as Action
+
+    switch (action) {
       case Action.RepOk: {
         this.mgmtQ.shift()?.resolve(frame)
         return
       }
       case Action.RepError: {
-        const payload = frame.subarray(HEADER_SIZE)
-        let broker: BrokerError | undefined
-        try {
-          broker = unpackr.unpack(payload) as BrokerError
-        } catch {}
-        const msg = broker?.message ?? (payload.toString('utf8') || 'server error')
-        const err = new ArbitroError(msg, 'server', broker?.name, broker?.details)
-        // RepError does NOT echo client_seq — use FIFO matching only.
+        // RepError body: ref_seq(8) + error_code(2) + _pad(6) = 16B
+        const errorCode = frame.length >= HEADER_SIZE + 10
+          ? frame.readUInt16LE(HEADER_SIZE + 8)
+          : 0
+        const err = new ArbitroError(
+          `server error (code=${errorCode})`, 'server', undefined, undefined,
+        )
         this.mgmtQ.shift()?.reject(err)
         return
       }
-      case Action.RepReply: {
-        // sequence was rewritten by the broker to publisher_seq for correlation.
-        const seq = frame.readBigUInt64LE(OFF_SEQUENCE)
-        const p   = this.pendingRequests.get(seq)
-        if (p) { this.pendingRequests.delete(seq); p.resolve(frame) }
-        return
-      }
-      case Action.RepMessage: {
-        // sub_id is patched into the timestamp field by the server drain thread.
-        const subId   = frame.readBigUInt64LE(OFF_TIMESTAMP)
-        const handler = this.routes.get(subId)
+      case Action.Deliver: {
+        // DeliverBody: consumer_id(4) at offset HEADER_SIZE
+        const consumerId = frame.readUInt32LE(HEADER_SIZE)
+        const handler = this.routes.get(consumerId)
         if (!handler) {
-          this.log.warn({ subId: subId.toString() }, 'delivery frame for unknown subId')
+          this.log.warn({ consumerId }, 'delivery for unknown consumer')
           return
         }
         handler(frame)
         return
       }
-      default: {
-        // Unknown action — surface as error, never silent drop (invariant #3).
-        const action = frame.readUInt16LE(6)
-        this.log.error({ action: `0x${action.toString(16)}` }, 'unknown action received')
-        this.drain(new ArbitroError(`unknown frame action 0x${action.toString(16)}`, 'protocol'))
+      case Action.RepBatch: {
+        // Batched delivery: consumer_id(4) + count(4) + entries...
+        this.handleBatchDeliver(frame)
+        return
       }
+      case Action.Pong: return  // no-op
+      default: {
+        const code = action.toString(16)
+        this.log.error({ action: `0x${code}` }, 'unknown action received')
+        this.drain(new ArbitroError(`unknown frame action 0x${code}`, 'protocol'))
+      }
+    }
+  }
+
+  private handleBatchDeliver(frame: Buffer): void {
+    // Header(16) + DeliverBatchHeader(8) + entries
+    if (frame.length < HEADER_SIZE + 8) return
+    const consumerId = frame.readUInt32LE(HEADER_SIZE)
+    const count      = frame.readUInt32LE(HEADER_SIZE + 4)
+    const handler    = this.routes.get(consumerId)
+    if (!handler) return
+
+    // Each entry: DeliverBatchEntry(16B) + subject + payload
+    let off = HEADER_SIZE + 8
+    for (let i = 0; i < count; i++) {
+      if (off + 16 > frame.length) break
+      const deliverSeq  = frame.readBigUInt64LE(off)
+      const subjectHash = frame.readUInt32LE(off + 8)
+      const subjectLen  = frame.readUInt16LE(off + 12)
+      const payloadLen  = frame.readUInt16LE(off + 14)
+      off += 16
+
+      // Synthesize a single-delivery frame for the handler
+      const singleSize = HEADER_SIZE + 12 + subjectLen + payloadLen
+      const single = Buffer.allocUnsafe(singleSize)
+      // Write header: action=Deliver, msg_len, seq=deliverSeq
+      single.writeUInt16LE(Action.Deliver, 0)
+      single[2] = 0; single[3] = 0
+      single.writeUInt32LE(12 + subjectLen + payloadLen, 4)
+      single.writeBigUInt64LE(deliverSeq, 8)
+      // Write body
+      single.writeUInt32LE(consumerId, HEADER_SIZE)
+      single.writeUInt32LE(subjectHash, HEADER_SIZE + 4)
+      single.writeUInt16LE(subjectLen, HEADER_SIZE + 8)
+      single.writeUInt16LE(0, HEADER_SIZE + 10)
+      // Copy subject + payload
+      frame.copy(single, HEADER_SIZE + 12, off, off + subjectLen + payloadLen)
+      off += subjectLen + payloadLen
+      handler(single)
     }
   }
 
   // ── Subscriptions ─────────────────────────────────────────────────────────
 
-  // Send PubSubscribe, register the delivery route, and track for reconnect.
-  // subject = stream name, data = msgpack consumer config (broker protocol).
-  async sendSubscribe(
-    streamName: string,
-    configData: Buffer,
+  async sendSubscribeV2(
+    consumerId: number,
+    filter:     Buffer,
     handler:    DeliveryHandler,
-    onRenew?:   (newSubId: bigint) => void,
-  ): Promise<bigint> {
+    onRenew?:   (newConsumerId: number) => void,
+  ): Promise<number> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new ArbitroError('subscribe timeout: no RepOk from server', 'timeout')),
+        () => reject(new ArbitroError('subscribe timeout', 'timeout')),
         5_000,
       )
       this.mgmtQ.push({
-        resolve: (frame) => {
+        resolve: (_frame) => {
           clearTimeout(timer)
-          const subId = frame.readBigUInt64LE(OFF_TIMESTAMP)
-          // Install the delivery route before yielding back to the caller.
-          // This closes the race where the server sends RepOk + first delivery
-          // in the same TCP burst during replay.
-          this.routes.set(subId, handler)
-          this.activeSubs.set(subId, { streamName, configData, handler, onRenew })
-          resolve(subId)
+          this.routes.set(consumerId, handler)
+          this.activeSubs.set(consumerId, { consumerId, filter, handler, onRenew })
+          resolve(consumerId)
         },
         reject: (err) => {
           clearTimeout(timer)
           reject(err)
         },
       })
-      this.socket.write(pack({
-        action:  Action.PubSubscribe,
-        flags:   Flags.None,
-        seq:     this.nextSeq(),
-        subject: streamName,
-        data:    configData,
-      }))
+      this.socket.write(packSubscribe(
+        this.nextSeq(), this.connId, consumerId, filter,
+      ))
     })
   }
 
-  // Remove the delivery route and cancel reconnect tracking.
-  cancelSubscription(subId: bigint): void {
-    this.routes.delete(subId)
-    this.activeSubs.delete(subId)
+  cancelSubscription(consumerId: number): void {
+    this.routes.delete(consumerId)
+    this.activeSubs.delete(consumerId)
+    this.socket.write(packUnsubscribe(this.nextSeq(), this.connId, consumerId))
   }
 
-  // Re-establish all active subscriptions after a reconnect.
   private resubscribeAll(): void {
+    // V2 handshake first
+    this.socket.write(packHello())
     const subs = [...this.activeSubs.values()]
     this.activeSubs.clear()
     this.routes.clear()
-    for (const { streamName, configData, handler, onRenew } of subs) {
-      this.sendSubscribe(streamName, configData, handler, onRenew)
-        .then((newId) => { if (onRenew) onRenew(newId) })
+    for (const { consumerId, filter, handler, onRenew } of subs) {
+      this.sendSubscribeV2(consumerId, filter, handler, onRenew)
+        .then((id) => { if (onRenew) onRenew(id) })
         .catch(() => {})
     }
   }
 
   // ── Routes (internal use) ─────────────────────────────────────────────────
 
-  registerRoute(subId: bigint, handler: DeliveryHandler): void {
-    this.routes.set(subId, handler)
+  registerRoute(consumerId: number, handler: DeliveryHandler): void {
+    this.routes.set(consumerId, handler)
   }
 
-  unregisterRoute(subId: bigint): void {
-    this.routes.delete(subId)
+  unregisterRoute(consumerId: number): void {
+    this.routes.delete(consumerId)
   }
 
   // ── Write ─────────────────────────────────────────────────────────────────
@@ -233,44 +255,34 @@ export class Connection {
     this.socket.write(frame)
   }
 
-  // Send frame and wait for RepOk. Returns the server_seq (timestamp field).
+  /** Send frame and wait for RepOk. Returns the ref_seq from RepOk body. */
   sendExpectReply(frame: Buffer, timeoutMs = 5_000): Promise<bigint> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new ArbitroError('subscribe timeout: no RepOk from server', 'timeout')),
+        () => reject(new ArbitroError('request timeout', 'timeout')),
         timeoutMs,
       )
       this.mgmtQ.push({
-        resolve: (f) => { clearTimeout(timer); resolve(f.readBigUInt64LE(OFF_TIMESTAMP)) },
-        reject:  (e) => { clearTimeout(timer); reject(e) },
+        resolve: (f) => {
+          clearTimeout(timer)
+          // RepOk body: ref_seq(u64) at HEADER_SIZE
+          const refSeq = f.readBigUInt64LE(HEADER_SIZE)
+          resolve(refSeq)
+        },
+        reject: (e) => { clearTimeout(timer); reject(e) },
       })
       this.socket.write(frame)
     })
   }
 
-  // Send frame and wait for RepOk with data. Returns data bytes after header.
-  sendExpectReplyData(frame: Buffer, timeoutMs = 5_000): Promise<Buffer> {
+  /** Send frame and wait for full reply frame buffer. */
+  sendExpectReplyRaw(frame: Buffer, timeoutMs = 5_000): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new ArbitroError('request timeout: no RepOk from server', 'timeout')),
+        () => reject(new ArbitroError('request timeout', 'timeout')),
         timeoutMs,
       )
       this.mgmtQ.push({
-        resolve: (f) => { clearTimeout(timer); resolve(f.subarray(HEADER_SIZE)) },
-        reject:  (e) => { clearTimeout(timer); reject(e) },
-      })
-      this.socket.write(frame)
-    })
-  }
-
-  // Send a request and wait for RepReply. Resolves with the raw reply frame.
-  sendRequest(seq: bigint, frame: Buffer, timeoutMs: number): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingRequests.delete(seq)
-        reject(new ArbitroError('request timeout: no reply received', 'timeout'))
-      }, timeoutMs)
-      this.pendingRequests.set(seq, {
         resolve: (f) => { clearTimeout(timer); resolve(f) },
         reject:  (e) => { clearTimeout(timer); reject(e) },
       })
@@ -278,89 +290,34 @@ export class Connection {
     })
   }
 
-  async requestMsgpack<T>(seq: bigint, frame: Buffer, timeoutMs: number): Promise<T> {
-    const data = await this.sendExpectReplyData(frame, timeoutMs)
-    return unpackr.unpack(data) as T
-  }
-
-  sendUnsubscribe(streamName: string, subId: bigint): void {
-    this.socket.write(pack({
-      action:    Action.PubUnsubscribe,
-      seq:       subId,
-      subject:   streamName,
-      data:      Buffer.alloc(0),
-    }))
-  }
-
-  sendAck(streamName: string, subId: bigint, msgSeq: bigint): void {
-    this.socket.write(pack({
-      action:    Action.RepAck,
-      seq:       subId,
-      timestamp: msgSeq,
-      subject:   streamName,
-      data:      Buffer.alloc(0),
-    }))
-  }
-
-  sendNack(streamName: string, subId: bigint, msgSeq: bigint): void {
-    this.socket.write(pack({
-      action:    Action.RepNack,
-      seq:       subId,
-      timestamp: msgSeq,
-      subject:   streamName,
-      data:      Buffer.alloc(0),
-    }))
-  }
-
-  sendNackDelay(streamName: string, subId: bigint, msgSeq: bigint, delayMs: number): void {
-    const data = Buffer.allocUnsafe(4)
-    data.writeUInt32LE(delayMs, 0)
-    this.socket.write(pack({
-      action:    Action.RepNack,
-      seq:       subId,
-      timestamp: msgSeq,
-      subject:   streamName,
-      data,
-    }))
-  }
-
-  // Send a reply to a request-reply message. msgSeq must be the journal_seq from the received frame.
-  sendReply(msgSeq: bigint, data: Buffer): void {
-    this.socket.write(pack({
-      action:  Action.RepReply,
-      seq:     msgSeq,
-      subject: Buffer.alloc(0),
-      data,
-    }))
-  }
-
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   close(): Promise<void> {
     this.closing = true
+    this.socket.write(packDisconnect(this.nextSeq()))
     return new Promise((resolve) => this.socket.end(resolve))
   }
 
   private drain(err: Error): void {
     const pending = this.mgmtQ.splice(0)
     for (const p of pending) p.reject(err)
-    for (const [, p] of this.pendingRequests) p.reject(err)
-    this.pendingRequests.clear()
   }
 
   private handleClose(): void {
     this.log.debug('arbitro connection closed')
     this.drain(new ArbitroError('connection closed', 'closed'))
     const cfg = this.reconnectCfg
-    if (!this.closing && cfg && cfg.enabled !== false && this.reconnectAddr) this.tryReconnect(0)
+    if (!this.closing && cfg && cfg.enabled !== false && this.reconnectAddr) {
+      this.tryReconnect(0)
+    }
   }
 
   private tryReconnect(attempt: number): void {
     const cfg = this.reconnectCfg
     if (!cfg) return
-    const max    = cfg.maxAttempts ?? 10
+    const max = cfg.maxAttempts ?? 10
     if (attempt >= max) {
-      this.log.warn({ attempt }, 'reconnect exhausted — giving up')
+      this.log.warn({ attempt }, 'reconnect exhausted')
       return
     }
     const base   = cfg.intervalMs ?? 500

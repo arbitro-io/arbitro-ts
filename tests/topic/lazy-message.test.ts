@@ -1,27 +1,14 @@
 import { describe, it, expect, vi } from 'vitest'
 import { makeLazyMessage } from '../../src/topic/lazy-message'
 import { Codec } from '../../src/utils/codec'
-import { pack } from '../../src/proto/codec'
-import { Action } from '../../src/proto/constants'
 
 interface Order { id: number; status: string }
 
 const OrderCodec = new Codec<Order>({ id: 'number', status: 'string' })
 
-function makeFrame(value: Order): Buffer {
-  return pack({
-    action:  Action.PubPublish,
-    seq:     1n,
-    subject: 'orders.new',
-    data:    OrderCodec.encode(value),
-  })
-}
-
 function makeMsg(value: Order, onAck = () => {}, onNack = () => {}, onNackDelay?: (ms: number) => void) {
-  const frame = makeFrame(value)
-  // data starts after header(32) + subjLen(2) + subj('orders.new' = 10)
-  const data  = frame.subarray(32 + 2 + 'orders.new'.length)
-  return makeLazyMessage(data, OrderCodec, OrderCodec.fields, onAck, onNack, onNackDelay)
+  const raw = OrderCodec.encode(value)
+  return makeLazyMessage(raw, OrderCodec, OrderCodec.fields, onAck, onNack, onNackDelay)
 }
 
 describe('LazyMessage', () => {

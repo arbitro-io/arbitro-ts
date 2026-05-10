@@ -1,5 +1,4 @@
 import { Message } from '../message/message'
-import { OFF_SEQUENCE } from '../proto/constants'
 import type { Connection } from '../net/connection'
 
 type MsgCallback = (msg: Message) => void
@@ -18,29 +17,23 @@ export class Subscription {
   private closed      = false
 
   constructor(
-    private subId: bigint,
+    private consumerId: number,
     private readonly conn: Connection,
     private readonly streamName: string,
     private readonly fetchTimeoutMs: number,
   ) {}
 
-  // Called by Connection.sendSubscribe after a reconnect assigns a new subId.
-  updateSubId(newSubId: bigint): void {
-    this.subId = newSubId
-  }
+  /** Consumer ID assigned by the server. */
+  id(): number { return this.consumerId }
 
-  // Called by the delivery handler registered in Connection.sendSubscribe.
+  // Called by the delivery handler.
   deliver(frame: Buffer): void {
     if (this.closed) return
 
-    const msgSeq = frame.readBigUInt64LE(OFF_SEQUENCE)
     const msg = new Message(
       frame,
-      this.subId,
-      () => this.conn.sendAck(this.streamName, this.subId, msgSeq),
-      () => this.conn.sendNack(this.streamName, this.subId, msgSeq),
-      (ms) => this.conn.sendNackDelay(this.streamName, this.subId, msgSeq, ms),
-      (data) => this.conn.sendReply(msgSeq, data),
+      (f) => this.conn.send(f),
+      () => this.conn.nextSeq(),
     )
 
     if (this.callback) {
@@ -86,8 +79,7 @@ export class Subscription {
 
   close(): void {
     this.closed = true
-    this.conn.sendUnsubscribe(this.streamName, this.subId)
-    this.conn.cancelSubscription(this.subId)
+    this.conn.cancelSubscription(this.consumerId)
     for (const p of this.fetchQueue) {
       clearTimeout(p.timer)
       p.resolve(p.buf)

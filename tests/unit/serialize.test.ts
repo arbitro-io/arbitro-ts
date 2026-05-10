@@ -1,102 +1,89 @@
 import { describe, it, expect } from 'vitest'
-import { Unpackr } from 'msgpackr'
-import { serializeStreamConfig, serializeConsumerConfig, serializeDeleteStreamOpts } from '../../src/client/serialize'
-import { DeliverPolicy, JournalType } from '../../src/types/config'
+import {
+  packCreateStream, packCreateConsumer, packDeleteStream, packDrainSubject,
+} from '../../src/proto/v2'
+import { Action, HEADER_SIZE, OFF_ACTION } from '../../src/proto/constants'
 
-const unpackr = new Unpackr({ useRecords: false })
-const unpack  = (buf: Buffer) => unpackr.unpack(buf) as Record<string, unknown>
+// Tests for V2 binary frame serialization (replaced V1 msgpack serialization)
 
-describe('serializeStreamConfig', () => {
-  it('encodes filter', () => {
-    const buf  = serializeStreamConfig({ subjectFilter: 'orders.>' })
-    const wire = unpack(buf)
-    expect(wire['filter']).toBe('orders.>')
+describe('packCreateStream', () => {
+  it('encodes name and filter with correct lengths', () => {
+    const frame = packCreateStream(
+      1n, Buffer.from('orders'), Buffer.from('orders.>'),
+      1000n, 500n, 3600n, 1, 1, 0, 0,
+    )
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateStream)
+    expect(frame.readUInt16LE(HEADER_SIZE)).toBe(6)       // name_len = "orders"
+    expect(frame.readUInt16LE(HEADER_SIZE + 2)).toBe(8)   // filter_len = "orders.>"
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 4)).toBe(1000n)   // max_msgs
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 12)).toBe(500n)   // max_bytes
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 20)).toBe(3600n)  // max_age_secs
+    expect(frame[HEADER_SIZE + 28]).toBe(1)  // replicas
+    expect(frame[HEADER_SIZE + 29]).toBe(1)  // journal_kind
+    // Tail: name + filter
+    const tail = frame.subarray(HEADER_SIZE + 32)
+    expect(tail.subarray(0, 6).toString()).toBe('orders')
+    expect(tail.subarray(6, 14).toString()).toBe('orders.>')
   })
 
-  it('encodes journal_kind', () => {
-    const buf  = serializeStreamConfig({ subjectFilter: 'x', journal: { type: JournalType.Tolerant } })
-    const wire = unpack(buf)
-    expect(wire['journal_kind']).toBe('Tolerant')
+  it('total frame size = HEADER_SIZE + 32 + name_len + filter_len', () => {
+    const name = Buffer.from('x')
+    const filter = Buffer.from('y')
+    const frame = packCreateStream(1n, name, filter, 0n, 0n, 0n)
+    expect(frame.length).toBe(HEADER_SIZE + 32 + 1 + 1)
   })
+})
 
-  it('encodes flush config for Strict journal', () => {
-    const buf  = serializeStreamConfig({
-      subjectFilter: 'x',
-      journal: { type: JournalType.Strict, flush: { intervalMs: 20, maxMessages: 256, maxBytes: 32768 } },
+describe('packCreateConsumer', () => {
+  it('encodes stream_id, name, group, filter', () => {
+    const frame = packCreateConsumer(1n, {
+      streamId: 7,
+      name: Buffer.from('worker'),
+      group: Buffer.from('grp'),
+      filter: Buffer.from('orders.>'),
+      maxInflight: 128,
+      ackPolicy: 1,
+      deliverPolicy: 2,
+      deliverMode: 0,
+      ackWaitMs: 30000,
+      startSeq: 42n,
     })
-    const wire = unpack(buf)
-    expect(wire['flush_interval_ms']).toBe(20)
-    expect(wire['flush_max_messages']).toBe(256)
-    expect(wire['flush_max_bytes']).toBe(32768)
-  })
-
-  it('converts maxAgeMs to max_age_ns as bigint', () => {
-    const buf  = serializeStreamConfig({ subjectFilter: 'x', maxAgeMs: 1000 })
-    const wire = unpack(buf)
-    expect(wire['max_age_ns']).toBe(1_000_000_000n)
-  })
-
-  it('omits optional fields when not set', () => {
-    const wire = unpack(serializeStreamConfig({ subjectFilter: 'x' }))
-    expect(wire['max_msgs']).toBeUndefined()
-    expect(wire['max_bytes']).toBeUndefined()
-    expect(wire['max_age_ns']).toBeUndefined()
-    expect(wire['journal_kind']).toBeUndefined()
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateConsumer)
+    // Body fields
+    expect(frame.readUInt16LE(HEADER_SIZE)).toBe(6)       // name_len
+    expect(frame.readUInt16LE(HEADER_SIZE + 2)).toBe(8)   // subj_len (filter)
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(7)   // stream_id
+    expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(128) // max_inflight
+    expect(frame[HEADER_SIZE + 10]).toBe(1)               // ack_policy
+    expect(frame[HEADER_SIZE + 11]).toBe(2)               // deliver_policy
+    expect(frame.readUInt16LE(HEADER_SIZE + 14)).toBe(3)  // group_len
+    expect(frame.readUInt32LE(HEADER_SIZE + 16)).toBe(30000) // ack_wait_ms
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 20)).toBe(42n) // start_seq
+    // Tail: name + group + filter
+    const tail = frame.subarray(HEADER_SIZE + 28)
+    expect(tail.subarray(0, 6).toString()).toBe('worker')
+    expect(tail.subarray(6, 9).toString()).toBe('grp')
+    expect(tail.subarray(9, 17).toString()).toBe('orders.>')
   })
 })
 
-describe('serializeConsumerConfig', () => {
-  it('encodes group and filter', () => {
-    const wire = unpack(serializeConsumerConfig({ name: 'workers', filter: 'orders.>' }))
-    expect(wire['group']).toBe('workers')
-    expect(wire['filter']).toBe('orders.>')
-  })
-
-  it('encodes fanout as deliver_mode Fanout', () => {
-    const wire = unpack(serializeConsumerConfig({ name: 'broadcast', filter: 'events.>', fanout: true }))
-    expect(wire['deliver_mode']).toBe('Fanout')
-  })
-
-  it('omits deliver_mode when fanout not set', () => {
-    const wire = unpack(serializeConsumerConfig({ name: 'w', filter: 'x' }))
-    expect(wire['deliver_mode']).toBeUndefined()
-  })
-
-  it('encodes deliver_policy', () => {
-    const wire = unpack(serializeConsumerConfig({
-      name: 'w', filter: 'x', deliverPolicy: DeliverPolicy.BySeq, startSeq: 42n,
-    }))
-    expect(wire['deliver_policy']).toBe('ByStartSeq')
-    expect(wire['start_seq']).toBe(42n)
-  })
-
-  it('encodes max_ack_pending', () => {
-    const wire = unpack(serializeConsumerConfig({ name: 'w', filter: 'x', maxAckPending: 500 }))
-    expect(wire['max_ack_pending']).toBe(500)
-  })
-
-  it('encodes credit_rules', () => {
-    const rules = [{ pattern: 'orders.us.>', limit: 100 }, { pattern: 'orders.eu.>', limit: 50 }]
-    const wire  = unpack(serializeConsumerConfig({ name: 'w', filter: 'x', creditRules: rules }))
-    expect(Array.isArray(wire['credit_rules'])).toBe(true)
-    expect((wire['credit_rules'] as unknown[]).length).toBe(2)
-  })
-
-  it('omits optional fields when not set', () => {
-    const wire = unpack(serializeConsumerConfig({ name: 'w', filter: 'x' }))
-    expect(wire['deliver_policy']).toBeUndefined()
-    expect(wire['max_ack_pending']).toBeUndefined()
-    expect(wire['credit_rules']).toBeUndefined()
+describe('packDeleteStream', () => {
+  it('encodes name_len and name', () => {
+    const frame = packDeleteStream(2n, Buffer.from('old-stream'))
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.DeleteStream)
+    expect(frame.readUInt16LE(HEADER_SIZE)).toBe(10)  // name_len
+    expect(frame.subarray(HEADER_SIZE + 8).toString()).toBe('old-stream')
   })
 })
 
-describe('serializeDeleteStreamOpts', () => {
-  it('encodes delete_data when set', () => {
-    const wire = unpack(serializeDeleteStreamOpts({ deleteData: false }))
-    expect(wire['delete_data']).toBe(false)
-  })
-
-  it('returns empty payload when opts are omitted', () => {
-    expect(serializeDeleteStreamOpts()).toEqual(Buffer.alloc(0))
+describe('packDrainSubject', () => {
+  it('encodes stream name + subject', () => {
+    const frame = packDrainSubject(3n, Buffer.from('events'), Buffer.from('events.old'))
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.DrainSubject)
+    expect(frame.readUInt16LE(HEADER_SIZE)).toBe(6)      // name_len
+    expect(frame.readUInt16LE(HEADER_SIZE + 2)).toBe(10) // subj_len
+    const tail = frame.subarray(HEADER_SIZE + 8)
+    expect(tail.subarray(0, 6).toString()).toBe('events')
+    expect(tail.subarray(6, 16).toString()).toBe('events.old')
   })
 })

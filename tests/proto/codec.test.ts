@@ -1,109 +1,193 @@
 import { describe, it, expect } from 'vitest'
-import { pack, FrameView, requiresSubject } from '../../src/proto/codec'
-import { Action, Flags, HEADER_SIZE, MAGIC, VERSION } from '../../src/proto/constants'
+import {
+  packPublish, packPublishBatch, packPublishWithReply,
+  packAck, packNack, packBatchAck, packBatchNack,
+  packSubscribe, packUnsubscribe, packHello, packPing, packDisconnect,
+  packCreateStream, packDeleteStream, packGetStream, packPurgeStream,
+  packDrainSubject, packListStreams,
+  packCreateConsumer, packDeleteConsumer, packGetConsumer, packListConsumers,
+} from '../../src/proto/v2'
+import {
+  Action, HEADER_SIZE, MAGIC_V2, CURRENT_VERSION, HELLO_SIZE,
+  OFF_ACTION, OFF_FLAGS, OFF_MSG_LEN, OFF_SEQ,
+} from '../../src/proto/constants'
 
-describe('codec — subject frames (Pub* actions)', () => {
-  it('pack produces correct magic and version', () => {
-    const frame = pack({ action: Action.PubPublish, seq: 1n, subject: 'foo', data: Buffer.from('bar') })
-    expect(new FrameView(frame).isValid()).toBe(true)
-  })
-
-  it('roundtrip preserves subject, data, seq, action', () => {
-    const subj  = Buffer.from('orders.us.new')
-    const data  = Buffer.from('{"id":1}')
-    const frame = pack({ action: Action.PubPublish, seq: 42n, subject: subj, data })
-    const view  = new FrameView(frame)
-    expect(view.subject().toString()).toBe('orders.us.new')
-    expect(view.data().toString()).toBe('{"id":1}')
-    expect(view.seq()).toBe(42n)
-    expect(view.action()).toBe(Action.PubPublish)
-  })
-
-  it('frame size is HEADER_SIZE + 2 + subject + data', () => {
-    const subj  = Buffer.from('foo')
-    const data  = Buffer.from('bar')
-    const frame = pack({ action: Action.PubPublish, seq: 1n, subject: subj, data })
-    expect(frame.length).toBe(HEADER_SIZE + 2 + subj.length + data.length)
-  })
-
-  it('flags are encoded correctly', () => {
-    const frame = pack({ action: Action.PubPublish, flags: Flags.NoAck, seq: 1n, subject: 'x', data: Buffer.alloc(0) })
-    expect(new FrameView(frame).flags() & Flags.NoAck).toBeTruthy()
-  })
-
-  it('subject() and data() are zero-copy views of the same buffer', () => {
-    const frame = pack({ action: Action.PubPublish, seq: 1n, subject: 'hello', data: Buffer.from('world') })
-    const view  = new FrameView(frame)
-    expect(view.subject().buffer).toBe(frame.buffer)
-    expect(view.data().buffer).toBe(frame.buffer)
-  })
-
-  it('hasSubject() is true for Pub* actions', () => {
-    const frame = pack({ action: Action.PubPublish, seq: 1n, subject: 'x', data: Buffer.alloc(0) })
-    expect(new FrameView(frame).hasSubject()).toBe(true)
+describe('V2 Hello frame', () => {
+  it('is 8 bytes with correct magic', () => {
+    const h = packHello()
+    expect(h.length).toBe(HELLO_SIZE)
+    expect(h.readUInt32LE(0)).toBe(MAGIC_V2)
+    expect(h[4]).toBe(CURRENT_VERSION)
+    expect(h[5]).toBe(0)  // Role.Client
   })
 })
 
-describe('codec — non-subject frames (Rep* / Sys* actions)', () => {
-  it('RepAck: frame is HEADER_SIZE + 2 bytes (empty subject u16 prefix)', () => {
-    const frame = pack({ action: Action.RepAck, seq: 1n, subject: Buffer.alloc(0), data: Buffer.alloc(0) })
-    expect(frame.length).toBe(HEADER_SIZE + 2)
+describe('V2 Publish frame', () => {
+  it('encodes action, stream_id, subject, payload', () => {
+    const subj = Buffer.from('orders.eu')
+    const data = Buffer.from('hello world')
+    const frame = packPublish(42n, 0xCAFE, subj, data)
+
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Publish)
+    expect(frame.readBigUInt64LE(OFF_SEQ)).toBe(42n)
+    // Body: stream_id at HEADER_SIZE
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(0xCAFE)
+    // subject_len at HEADER_SIZE + 4
+    expect(frame.readUInt16LE(HEADER_SIZE + 4)).toBe(subj.length)
+    // subject at HEADER_SIZE + 8
+    expect(frame.subarray(HEADER_SIZE + 8, HEADER_SIZE + 8 + subj.length).toString()).toBe('orders.eu')
+    // payload after subject
+    expect(frame.subarray(HEADER_SIZE + 8 + subj.length).toString()).toBe('hello world')
   })
 
-  it('RepAck: subject() and data() return empty buffers without OOB', () => {
-    const frame = pack({ action: Action.RepAck, seq: 1n, subject: Buffer.alloc(0), data: Buffer.alloc(0) })
-    const view  = new FrameView(frame)
-    expect(view.hasSubject()).toBe(true)
-    expect(view.subject().length).toBe(0)
-    expect(view.data().length).toBe(0)
+  it('frame size = 16 + 8 + subject + payload', () => {
+    const subj = Buffer.from('x')
+    const data = Buffer.from('y')
+    const frame = packPublish(1n, 0, subj, data)
+    expect(frame.length).toBe(HEADER_SIZE + 8 + 1 + 1)
   })
 
-  it('RepOk: seq is preserved, no crash on subject()/data()', () => {
-    const frame = pack({ action: Action.RepOk, seq: 99n, subject: Buffer.alloc(0), data: Buffer.alloc(0) })
-    const view  = new FrameView(frame)
-    expect(view.seq()).toBe(99n)
-    expect(view.subject().length).toBe(0)
-    expect(view.data().length).toBe(0)
-  })
-
-  it('RepError: data() returns the error message bytes', () => {
-    const msg   = Buffer.from('consumer not found')
-    const frame = pack({ action: Action.RepError, seq: 0n, subject: Buffer.alloc(0), data: msg })
-    const view  = new FrameView(frame)
-    expect(view.hasSubject()).toBe(false)
-    expect(view.data().toString()).toBe('consumer not found')
-  })
-
-  it('RepError: frame size is HEADER_SIZE + message bytes', () => {
-    const msg   = Buffer.from('oops')
-    const frame = pack({ action: Action.RepError, seq: 0n, subject: Buffer.alloc(0), data: msg })
-    expect(frame.length).toBe(HEADER_SIZE + msg.length)
+  it('msg_len in header matches body size', () => {
+    const subj = Buffer.from('test')
+    const data = Buffer.from('data')
+    const frame = packPublish(1n, 0, subj, data)
+    const msgLen = frame.readUInt32LE(OFF_MSG_LEN)
+    expect(msgLen).toBe(8 + subj.length + data.length)
   })
 })
 
-describe('requiresSubject', () => {
-  it('returns true for all Pub* actions', () => {
-    const pubActions = [
-      Action.PubPublish, Action.PubSubscribe, Action.PubUnsubscribe,
-      Action.PubCreateStream, Action.PubDeleteStream, Action.PubPull,
-      Action.PubCreateConsumer, Action.PubDeleteConsumer,
+describe('V2 PublishBatch frame', () => {
+  it('encodes multiple entries', () => {
+    const entries = [
+      { subject: Buffer.from('a.b'), payload: Buffer.from('P1') },
+      { subject: Buffer.from('c.d.e'), payload: Buffer.from('P2P2') },
     ]
-    for (const a of pubActions) expect(requiresSubject(a)).toBe(true)
+    const frame = packPublishBatch(7n, 0xBEEF, entries)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.PublishBatch)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(0xBEEF)      // stream_id
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(2)        // count
+  })
+})
+
+describe('V2 Subscribe frame', () => {
+  it('encodes consumer_id and filter', () => {
+    const filter = Buffer.from('orders.*.eu')
+    const frame = packSubscribe(5n, 100, 42, filter)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Subscribe)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(100)       // conn_id
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(42)    // consumer_id
+    expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(filter.length)
+    expect(frame.subarray(HEADER_SIZE + 12, HEADER_SIZE + 12 + filter.length).toString()).toBe('orders.*.eu')
+  })
+})
+
+describe('V2 Ack/Nack frames', () => {
+  it('Ack encodes consumer_id + subject_hash + ack_seq', () => {
+    const frame = packAck(1n, 77, 0xDEAD, 999n)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Ack)
+    expect(frame.length).toBe(HEADER_SIZE + 16)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(77)
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(0xDEAD)
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 8)).toBe(999n)
   })
 
-  it('returns false for non-subject Rep* actions', () => {
-    const repNoSubject = [Action.RepOk, Action.RepReply, Action.RepError]
-    for (const a of repNoSubject) expect(requiresSubject(a)).toBe(false)
+  it('Nack encodes consumer_id + subject_hash + nack_seq', () => {
+    const frame = packNack(2n, 88, 0xBEEF, 500n)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Nack)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(88)
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 8)).toBe(500n)
   })
 
-  it('returns true for RepAck and RepNack (wire protocol includes stream_name)', () => {
-    expect(requiresSubject(Action.RepAck)).toBe(true)
-    expect(requiresSubject(Action.RepNack)).toBe(true)
+  it('BatchAck encodes entries', () => {
+    const entries = [
+      { seq: 100n, subjectHash: 0x11 },
+      { seq: 101n, subjectHash: 0x22 },
+    ]
+    const frame = packBatchAck(3n, 77, entries)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.BatchAck)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(77)
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(2)
+    // First entry at HEADER_SIZE + 8
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 8)).toBe(100n)
+    expect(frame.readUInt32LE(HEADER_SIZE + 16)).toBe(0x11)
   })
 
-  it('returns false for SysConnect, SysKeepalive, SysDisconnect', () => {
-    expect(requiresSubject(Action.SysConnect)).toBe(false)
-    expect(requiresSubject(Action.SysKeepalive)).toBe(false)
-    expect(requiresSubject(Action.SysDisconnect)).toBe(false)
+  it('BatchNack encodes entries with delay_ms', () => {
+    const entries = [
+      { seq: 200n, subjectHash: 0x33, delayMs: 5000 },
+    ]
+    const frame = packBatchNack(4n, 88, entries)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.BatchNack)
+    expect(frame.readUInt32LE(HEADER_SIZE + 8 + 12)).toBe(5000)
+  })
+})
+
+describe('V2 Stream management frames', () => {
+  it('CreateStream encodes name + filter + retention', () => {
+    const frame = packCreateStream(1n, Buffer.from('events'), Buffer.from('events.>'), 1000n, 0n, 3600n)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateStream)
+    expect(frame.readUInt16LE(HEADER_SIZE)).toBe(6)       // name_len
+    expect(frame.readUInt16LE(HEADER_SIZE + 2)).toBe(8)   // filter_len
+    expect(frame.readBigUInt64LE(HEADER_SIZE + 4)).toBe(1000n)  // max_msgs
+  })
+
+  it('DeleteStream encodes name', () => {
+    const frame = packDeleteStream(2n, Buffer.from('old'))
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.DeleteStream)
+    expect(frame.subarray(HEADER_SIZE + 8, HEADER_SIZE + 8 + 3).toString()).toBe('old')
+  })
+
+  it('ListStreams encodes offset and limit', () => {
+    const frame = packListStreams(3n, 10, 50)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.ListStreams)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(10)
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(50)
+  })
+})
+
+describe('V2 Consumer management frames', () => {
+  it('CreateConsumer encodes all fields', () => {
+    const frame = packCreateConsumer(1n, {
+      streamId: 7,
+      name: Buffer.from('worker'),
+      group: Buffer.from('grp'),
+      filter: Buffer.from('orders.>'),
+      maxInflight: 128,
+      ackPolicy: 1,
+      deliverPolicy: 0,
+      ackWaitMs: 30000,
+      startSeq: 0n,
+    })
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateConsumer)
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(7)  // stream_id
+    expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(128)  // max_inflight
+  })
+
+  it('DeleteConsumer encodes consumer_id', () => {
+    const frame = packDeleteConsumer(2n, 42)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.DeleteConsumer)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(42)
+  })
+
+  it('GetConsumer encodes stream_id + name', () => {
+    const frame = packGetConsumer(3n, 7, Buffer.from('worker'))
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.GetConsumer)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(7)
+    expect(frame.readUInt16LE(HEADER_SIZE + 4)).toBe(6)  // name_len
+  })
+})
+
+describe('V2 System frames', () => {
+  it('Ping is just a header (msg_len=0)', () => {
+    const frame = packPing(5n)
+    expect(frame.length).toBe(HEADER_SIZE)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Ping)
+    expect(frame.readUInt32LE(OFF_MSG_LEN)).toBe(0)
+  })
+
+  it('Disconnect is just a header', () => {
+    const frame = packDisconnect(6n)
+    expect(frame.length).toBe(HEADER_SIZE)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Disconnect)
   })
 })

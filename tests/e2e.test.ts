@@ -25,8 +25,8 @@ describe('end-to-end', () => {
     const received: string[] = []
     const subscription = await sub.subscribe(name, (msg) => received.push(msg.data().toString()))
 
-    pub.publish(`${name}.event`, Buffer.from('hello'))
-    pub.publish(`${name}.event`, Buffer.from('world'))
+    pub.publish(name, `${name}.event`, Buffer.from('hello'))
+    pub.publish(name, `${name}.event`, Buffer.from('world'))
 
     await waitUntil(() => received.length >= 2)
     subscription.close()
@@ -38,7 +38,7 @@ describe('end-to-end', () => {
     const name = uniqueName('e'); created.push(name)
     await admin.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     // No subscriber needed — server sends RepOk once message is journaled.
-    await expect(pub.publishAck(`${name}.e`, Buffer.from('data'))).resolves.toBeUndefined()
+    await expect(pub.publishAck(name, `${name}.e`, Buffer.from('data'))).resolves.toBeUndefined()
   })
 
   it('messages delivered in publish order across clients', async () => {
@@ -50,7 +50,7 @@ describe('end-to-end', () => {
     const subscription = await sub.subscribe(name, (msg) => received.push(msg.data().toString()))
 
     for (let i = 0; i < 5; i++) {
-      await pub.publishAck(`${name}.e`, Buffer.from(`msg-${i}`))
+      await pub.publishAck(name, `${name}.e`, Buffer.from(`msg-${i}`))
     }
     await waitUntil(() => received.length >= 5)
     subscription.close()
@@ -67,7 +67,7 @@ describe('end-to-end', () => {
     const received: string[] = []
     const subscription = await sub.subscribe(name, (msg) => received.push(msg.data().toString()))
 
-    await pub.publishAck(`${name}.log`, Buffer.from('event'))
+    await pub.publishAck(name, `${name}.log`, Buffer.from('event'))
     await waitUntil(() => received.length >= 1)
     subscription.close()
 

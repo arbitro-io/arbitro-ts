@@ -19,7 +19,7 @@ describe('publish/subscribe', () => {
     const received: string[] = []
     const sub = await client.subscribe(name, (msg) => received.push(msg.data().toString()))
 
-    client.publish(`${name}.e`, Buffer.from('hello'))
+    client.publish(name, `${name}.e`, Buffer.from('hello'))
     await waitUntil(() => received.length >= 1)
     sub.close()
 
@@ -31,7 +31,7 @@ describe('publish/subscribe', () => {
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
     await expect(
-      client.publishAck(`${name}.e`, Buffer.from('acked')),
+      client.publishAck(name, `${name}.e`, Buffer.from('acked')),
     ).resolves.toBeUndefined()
   })
 
@@ -67,7 +67,7 @@ describe('publish/subscribe', () => {
     const sub1 = await client.subscribe(name, (msg) => bucket1.push(msg.data().toString()))
     const sub2 = await client.subscribe(name, (msg) => bucket2.push(msg.data().toString()))
 
-    await client.publishAck(`${name}.e`, Buffer.from('broadcast'))
+    await client.publishAck(name, `${name}.e`, Buffer.from('broadcast'))
     await waitUntil(() => bucket1.length >= 1 && bucket2.length >= 1)
     sub1.close()
     sub2.close()

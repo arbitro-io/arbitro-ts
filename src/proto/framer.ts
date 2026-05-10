@@ -1,10 +1,9 @@
-import { HEADER_SIZE, OFF_ACTION, OFF_CRC32C, OFF_LENGTH, Action } from './constants'
+import { HEADER_SIZE, OFF_MSG_LEN } from './constants'
 
 type FrameCallback = (frame: Buffer) => void
 
-// Accumulates incoming TCP bytes and emits complete frames.
-// A frame is: HEADER_SIZE bytes of header + payload bytes.
-// RepMessage/RepBatch use a different layout: payload = crc32c (topic_len) + length (data_len).
+// Accumulates incoming TCP bytes and emits complete V2 frames.
+// A frame is: Header(16B) + body(msg_len bytes).
 export class Framer {
   private buf = Buffer.allocUnsafe(65_536)
   private pos = 0
@@ -17,23 +16,9 @@ export class Framer {
     let offset = 0
     while (offset < this.pos) {
       if (this.pos - offset < HEADER_SIZE) break
-
-      const action     = this.buf.readUInt16LE(offset + OFF_ACTION)
-      const lengthVal  = this.buf.readUInt32LE(offset + OFF_LENGTH)
-
-      // RepMessage: crc32c = topic_len, length = data_len. Total payload = both.
-      // RepBatch:   crc32c = entry_count, length = total payload bytes.
-      let payloadLen: number
-      if (action === Action.RepMessage) {
-        const topicLen = this.buf.readUInt32LE(offset + OFF_CRC32C)
-        payloadLen = topicLen + lengthVal
-      } else {
-        payloadLen = lengthVal
-      }
-
-      const frameLen = HEADER_SIZE + payloadLen
+      const msgLen   = this.buf.readUInt32LE(offset + OFF_MSG_LEN)
+      const frameLen = HEADER_SIZE + msgLen
       if (this.pos - offset < frameLen) break
-
       onFrame(Buffer.from(this.buf.subarray(offset, offset + frameLen)))
       offset += frameLen
     }
