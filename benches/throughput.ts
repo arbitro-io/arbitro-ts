@@ -333,9 +333,7 @@ async function runCreditScenario(label: string, maxCredit: number | null): Promi
 
   sub.close()
   await Promise.all([subClient.close(), pubClient.close()])
-  admin.deleteConsumer(stream, consumer)
-  admin.deleteStream(stream)
-  await admin.close()
+  await cleanup(admin, consumer, stream)
 }
 
 async function runCredit(): Promise<void> {
