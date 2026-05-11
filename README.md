@@ -60,21 +60,23 @@ const sub = await client.subscribe('workers', (msg) => {
 await client.publish('orders', 'orders.new', Buffer.from('hello'))
 ```
 
-## Publish modes
+## Publish
+
+`publish()` returns `Promise<void>` that resolves once the broker confirms
+receipt (`RepOk`). The TypeScript idiom is "everything async, the caller
+chooses to await" — the same call site supports both semantics:
 
 ```typescript
-// Default — Promise<void>, resolves on broker RepOk.
-// The caller chooses the semantics:
-
-await client.publish('orders', 'orders.new', data)   // wait for broker ack
-client.publish('orders', 'orders.new', data)         // fire-and-forget (don't await)
-client.publish('orders', 'orders.new', data)         //   (errors are silently dropped)
-  .catch(handleError)                                 // or attach a handler
-
-// Pure fire-and-forget — no RepOk wire reply at all.
-// Cheapest path, use for telemetry firehose / fanout-heavy workloads.
-client.publishNoAck('orders', 'orders.new', data)
+await client.publish('orders', 'orders.new', data)            // wait for broker ack
+client.publish('orders', 'orders.new', data)                  // fire-and-forget
+client.publish('orders', 'orders.new', data).catch(onError)   // async error path
 ```
+
+The broker emits `RepOk` regardless of whether the caller awaits, so
+there's no wire-level savings from a "no-reply" variant. That's the
+property that lets TS expose a single, ergonomic API. Rust's lazy-future
+model has to pick `publish` (fire-and-forget) vs `publish_sync`
+(awaited) at the call site.
 
 ## Durable management
 

@@ -58,11 +58,6 @@ export class Stream {
     return this.client.publish(this.name, subject, data)
   }
 
-  /** Pure fire-and-forget (no `RepOk` wire reply). See `ArbitroClient.publishNoAck`. */
-  publishNoAck(subject: string, data: Buffer): void {
-    this.client.publishNoAck(this.name, subject, data)
-  }
-
   /** @deprecated alias for {@link publish}. */
   publishAck(subject: string, data: Buffer): Promise<void> {
     return this.client.publish(this.name, subject, data)

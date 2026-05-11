@@ -78,12 +78,14 @@ export class ArbitroClient {
    * broker confirms receipt (`RepOk`). The TS idiom is "everything async,
    * the caller chooses to await":
    *
-   *   await client.publish(s, subj, data)   // wait for broker ack
-   *   client.publish(s, subj, data)         // fire-and-forget (no await)
+   *   await client.publish(s, subj, data)               // wait for ack
+   *   client.publish(s, subj, data)                     // fire-and-forget
    *   client.publish(s, subj, data).catch(handleError)  // async error path
    *
-   * For pure fire-and-forget that skips the broker round-trip entirely
-   * (no `RepOk` wire reply at all), use `publishNoAck`.
+   * The broker always emits `RepOk` regardless of whether the caller
+   * awaits — that's what enables the same call site to support both
+   * semantics. A "no-reply" path doesn't save wire bytes, so it isn't
+   * exposed.
    */
   async publish(streamName: string, subject: string, data: Buffer): Promise<void> {
     const sid = await this.resolveStreamId(streamName)
@@ -92,20 +94,8 @@ export class ArbitroClient {
   }
 
   /**
-   * Pure fire-and-forget publish. No `RepOk` is requested — the broker
-   * never sends a wire reply. Cheapest path; use when throughput matters
-   * more than per-message confirmation (e.g. telemetry firehose).
-   */
-  publishNoAck(streamName: string, subject: string, data: Buffer): void {
-    const sid = this.cachedSid(streamName)
-    streamPublish(this.conn, sid, this.prefixed(subject), data)
-    this._metrics.publishesSent++
-  }
-
-  /**
-   * @deprecated alias for {@link publish} — kept for migration. The
-   * default `publish` now waits for the broker `RepOk` and returns a
-   * Promise, so this method is now identical.
+   * @deprecated alias for {@link publish}. The default `publish` already
+   * waits for `RepOk` and returns a Promise, so this method is identical.
    */
   publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
     return this.publish(streamName, subject, data)
