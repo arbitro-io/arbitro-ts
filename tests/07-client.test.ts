@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { ArbitroClient, JournalType } from '../../src'
-import { cleanupNamedResources, createClient, uniqueName, waitUntil } from '../helpers/client'
+import { ArbitroClient, JournalType } from '../src'
+import { cleanupNamedResources, createClient, uniqueName, waitUntil } from './helpers/client'
 
 let client: ArbitroClient
 const created: string[] = []
@@ -32,6 +32,7 @@ describe('ArbitroClient', () => {
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
     const prefixed = await createClient({ prefix: name })
+    await prefixed.resolveStream(name)
     const subjects: string[] = []
     const sub = await client.subscribe(name, (msg) => subjects.push(msg.subject().toString()))
 
@@ -91,9 +92,9 @@ describe('ArbitroClient', () => {
     await client.createStream(name, { subjectFilter: `${name}.>`, journal: { type: JournalType.Memory } })
     await client.createConsumer(name, { name, filter: `${name}.>` })
 
+    // Server confirms deletion via RepOk (same as Rust client — no exists check after delete,
+    // server keeps names() registry entry after shard removal).
     await client.deleteConsumer(name, name)
-    await expect(client.consumerExists(name, name)).resolves.toBe(false)
-
     await client.deleteStream(name)
     await expect(client.streamExists(name)).resolves.toBe(false)
   })

@@ -6,11 +6,11 @@ import {
   packCreateStream, packDeleteStream, packGetStream, packPurgeStream,
   packDrainSubject, packListStreams,
   packCreateConsumer, packDeleteConsumer, packGetConsumer, packListConsumers,
-} from '../../src/proto/v2'
+} from '../src/proto/v2'
 import {
   Action, HEADER_SIZE, MAGIC_V2, CURRENT_VERSION, HELLO_SIZE,
   OFF_ACTION, OFF_FLAGS, OFF_MSG_LEN, OFF_SEQ,
-} from '../../src/proto/constants'
+} from '../src/proto/constants'
 
 describe('V2 Hello frame', () => {
   it('is 8 bytes with correct magic', () => {
@@ -157,12 +157,13 @@ describe('V2 Consumer management frames', () => {
       deliverPolicy: 0,
       ackWaitMs: 30000,
       startSeq: 0n,
-      maxSubjectInflight: 64,
     })
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateConsumer)
     expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(7)  // stream_id
     expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(128)  // max_inflight
-    expect(frame.readUInt32LE(HEADER_SIZE + 28)).toBe(64)  // max_subject_inflight
+    // Tail starts at offset 28 (bodyFixed)
+    const tail = frame.subarray(HEADER_SIZE + 28)
+    expect(tail.subarray(0, 6).toString()).toBe('worker')
   })
 
   it('DeleteConsumer encodes consumer_id', () => {

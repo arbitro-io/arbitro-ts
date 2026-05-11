@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { Codec, JsonCodec, StringCodec, TextEncoding } from '../../src/utils/codec'
-import type { Encoding } from '../../src/utils/codec'
+import { Codec, JsonCodec, StringCodec, TextEncoding } from '../src/utils/codec'
+import type { Encoding } from '../src/utils/codec'
 
 // ── Encoding<T> contract ───────────────────────────────────────────────────
 

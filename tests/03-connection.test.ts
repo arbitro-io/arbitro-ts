@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { packAck, packNack, packBatchNack, packSubscribe, packUnsubscribe } from '../../src/proto/v2'
-import { Action, HEADER_SIZE, OFF_ACTION, OFF_SEQ } from '../../src/proto/constants'
+import { packAck, packNack, packBatchNack, packSubscribe, packUnsubscribe } from '../src/proto/v2'
+import { Action, HEADER_SIZE, OFF_ACTION, OFF_SEQ } from '../src/proto/constants'
 
 // Unit tests for V2 frame building — no server needed.
 // Verifies that ack/nack/subscribe frames are encoded correctly.

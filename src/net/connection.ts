@@ -9,6 +9,7 @@ import { ArbitroError } from '../types/error'
 import type { TlsConfig, ReconnectConfig } from '../types/config'
 import { resolveLogger } from '../common/logger'
 import type { Logger } from '../common/logger'
+import type { ClientMetrics } from '../client/metrics'
 
 type DeliveryHandler = (frame: Buffer) => void
 
@@ -35,12 +36,13 @@ export class Connection {
   private seq             = 1n
   private connId          = 0
   private framer          = new Framer()
-  private routes          = new Map<number, DeliveryHandler>()  // consumer_id → handler
-  private mgmtQ:          PendingMgmt[]                    = []
+  private routes          = new Map<number, DeliveryHandler>()
+  private pending         = new Map<bigint, PendingMgmt>()
   private socket:         net.Socket
   private closing         = false
   private readonly log:   Logger
   private activeSubs      = new Map<number, ActiveSubscription>()
+  private metrics?:       ClientMetrics
 
   private constructor(
     socket: net.Socket,
@@ -77,7 +79,6 @@ export class Connection {
       const done = (socket: net.Socket) => {
         clearTimeout(timer)
         const conn = new Connection(socket, parsed, reconnectCfg, logger)
-        // V2 handshake: send HelloFrame immediately after TCP connect.
         socket.write(packHello())
         conn.log.info({ host, port }, 'arbitro connected (v2)')
         resolve(conn)
@@ -104,63 +105,79 @@ export class Connection {
 
   nextSeq(): bigint { return this.seq++ }
 
+  /**
+   * Attach a metrics sink. Called by `ArbitroClient` after `connect()`.
+   * The connection bumps `deliveriesReceived` on every Deliver/RepBatch
+   * entry and `reconnects` on successful reconnections. Unset = no-op.
+   */
+  setMetrics(m: ClientMetrics): void { this.metrics = m }
+
   // ── Frame routing ─────────────────────────────────────────────────────────
-  // V2 dispatch: switch on action (jump table). O(1).
+  // Seq-based dispatch: match reply.header.seq → pending request. O(1).
+
+  private resolvePending(frame: Buffer): void {
+    const reqSeq = frame.readBigUInt64LE(OFF_SEQ)
+    const p = this.pending.get(reqSeq)
+    if (!p) return
+    this.pending.delete(reqSeq)
+    p.resolve(frame)
+  }
+
+  private rejectPending(frame: Buffer): void {
+    const reqSeq = frame.readBigUInt64LE(OFF_SEQ)
+    const p = this.pending.get(reqSeq)
+    if (!p) return
+    this.pending.delete(reqSeq)
+    const errorCode = frame.length >= HEADER_SIZE + 10
+      ? frame.readUInt16LE(HEADER_SIZE + 8)
+      : 0
+    p.reject(new ArbitroError(
+      `server error (code=${errorCode})`, 'server', undefined, undefined,
+    ))
+  }
 
   private onFrame(frame: Buffer): void {
     const action = frame.readUInt16LE(OFF_ACTION) as Action
 
     switch (action) {
-      case Action.RepOk: {
-        this.mgmtQ.shift()?.resolve(frame)
+      case Action.RepOk:
+      case Action.ListStreams:
+      case Action.ListConsumers: {
+        this.resolvePending(frame)
         return
       }
       case Action.RepError: {
-        // RepError body: ref_seq(8) + error_code(2) + _pad(6) = 16B
-        const errorCode = frame.length >= HEADER_SIZE + 10
-          ? frame.readUInt16LE(HEADER_SIZE + 8)
-          : 0
-        const err = new ArbitroError(
-          `server error (code=${errorCode})`, 'server', undefined, undefined,
-        )
-        this.mgmtQ.shift()?.reject(err)
+        this.rejectPending(frame)
         return
       }
       case Action.Deliver: {
-        // DeliverBody: consumer_id(4) at offset HEADER_SIZE
         const consumerId = frame.readUInt32LE(HEADER_SIZE)
         const handler = this.routes.get(consumerId)
         if (!handler) {
           this.log.warn({ consumerId }, 'delivery for unknown consumer')
           return
         }
+        if (this.metrics) this.metrics.deliveriesReceived++
         handler(frame)
         return
       }
       case Action.RepBatch: {
-        // Batched delivery: consumer_id(4) + count(4) + entries...
         this.handleBatchDeliver(frame)
         return
       }
-      case Action.Pong: return  // no-op
+      case Action.Pong: return
       default: {
-        const code = action.toString(16)
-        this.log.error({ action: `0x${code}` }, 'unknown action received')
-        this.drain(new ArbitroError(`unknown frame action 0x${code}`, 'protocol'))
+        // Silently drop unknown actions (matches Rust client behavior)
+        this.log.debug({ action: `0x${action.toString(16)}` }, 'unknown action, dropped')
       }
     }
   }
 
   private handleBatchDeliver(frame: Buffer): void {
-    // Envelope(16) + RepBatchFixed(4) + N × entries
-    // RepBatchFixed: count(u16) + pad(u16)
     if (frame.length < HEADER_SIZE + 4) return
     const count = frame.readUInt16LE(HEADER_SIZE)
     let off = HEADER_SIZE + 4
 
-    // Each entry: DeliveryEntryHeader(24B) + tail(data_len bytes)
-    //   consumer_id(4) + seq(8) + subj_len(2) + reply_len(2) + data_len(4) + subject_hash(4)
-    // data_len = subj_len + reply_len + payload_len (combined tail)
     for (let i = 0; i < count; i++) {
       if (off + 24 > frame.length) break
       const consumerId  = frame.readUInt32LE(off)
@@ -177,7 +194,6 @@ export class Connection {
 
       const handler = this.routes.get(consumerId)
       if (handler) {
-        // Synthesize a single Deliver frame for the subscription
         const bodyLen = 12 + subjectLen + payloadLen
         const single  = Buffer.allocUnsafe(HEADER_SIZE + bodyLen)
         single.writeUInt16LE(Action.Deliver, 0)
@@ -189,7 +205,9 @@ export class Connection {
         single.writeUInt16LE(subjectLen, HEADER_SIZE + 8)
         single.writeUInt16LE(0, HEADER_SIZE + 10)
         frame.copy(single, HEADER_SIZE + 12, off, off + subjectLen)
-        frame.copy(single, HEADER_SIZE + 12 + subjectLen, off + subjectLen + replyLen, tailEnd)
+        frame.copy(single, HEADER_SIZE + 12 + subjectLen,
+          off + subjectLen + replyLen, tailEnd)
+        if (this.metrics) this.metrics.deliveriesReceived++
         handler(single)
       }
       off = tailEnd
@@ -205,25 +223,21 @@ export class Connection {
     onRenew?:   (newConsumerId: number) => void,
   ): Promise<number> {
     return new Promise((resolve, reject) => {
+      const seq   = this.nextSeq()
       const timer = setTimeout(
-        () => reject(new ArbitroError('subscribe timeout', 'timeout')),
+        () => { this.pending.delete(seq); reject(new ArbitroError('subscribe timeout', 'timeout')) },
         5_000,
       )
-      this.mgmtQ.push({
+      this.pending.set(seq, {
         resolve: (_frame) => {
           clearTimeout(timer)
           this.routes.set(consumerId, handler)
           this.activeSubs.set(consumerId, { consumerId, filter, handler, onRenew })
           resolve(consumerId)
         },
-        reject: (err) => {
-          clearTimeout(timer)
-          reject(err)
-        },
+        reject: (err) => { clearTimeout(timer); reject(err) },
       })
-      this.socket.write(packSubscribe(
-        this.nextSeq(), this.connId, consumerId, filter,
-      ))
+      this.socket.write(packSubscribe(seq, this.connId, consumerId, filter))
     })
   }
 
@@ -234,7 +248,6 @@ export class Connection {
   }
 
   private resubscribeAll(): void {
-    // V2 handshake first
     this.socket.write(packHello())
     const subs = [...this.activeSubs.values()]
     this.activeSubs.clear()
@@ -262,19 +275,18 @@ export class Connection {
     this.socket.write(frame)
   }
 
-  /** Send frame and wait for RepOk. Returns the ref_seq from RepOk body. */
+  /** Send frame and wait for RepOk. Returns the ref_seq from body. */
   sendExpectReply(frame: Buffer, timeoutMs = 5_000): Promise<bigint> {
+    const seq = frame.readBigUInt64LE(OFF_SEQ)
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new ArbitroError('request timeout', 'timeout')),
+        () => { this.pending.delete(seq); reject(new ArbitroError('request timeout', 'timeout')) },
         timeoutMs,
       )
-      this.mgmtQ.push({
+      this.pending.set(seq, {
         resolve: (f) => {
           clearTimeout(timer)
-          // RepOk body: ref_seq(u64) at HEADER_SIZE
-          const refSeq = f.readBigUInt64LE(HEADER_SIZE)
-          resolve(refSeq)
+          resolve(f.readBigUInt64LE(HEADER_SIZE))
         },
         reject: (e) => { clearTimeout(timer); reject(e) },
       })
@@ -284,12 +296,13 @@ export class Connection {
 
   /** Send frame and wait for full reply frame buffer. */
   sendExpectReplyRaw(frame: Buffer, timeoutMs = 5_000): Promise<Buffer> {
+    const seq = frame.readBigUInt64LE(OFF_SEQ)
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
-        () => reject(new ArbitroError('request timeout', 'timeout')),
+        () => { this.pending.delete(seq); reject(new ArbitroError('request timeout', 'timeout')) },
         timeoutMs,
       )
-      this.mgmtQ.push({
+      this.pending.set(seq, {
         resolve: (f) => { clearTimeout(timer); resolve(f) },
         reject:  (e) => { clearTimeout(timer); reject(e) },
       })
@@ -306,8 +319,8 @@ export class Connection {
   }
 
   private drain(err: Error): void {
-    const pending = this.mgmtQ.splice(0)
-    for (const p of pending) p.reject(err)
+    for (const p of this.pending.values()) p.reject(err)
+    this.pending.clear()
   }
 
   private handleClose(): void {

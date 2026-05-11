@@ -26,8 +26,8 @@ function unique(prefix: string): { stream: string, subject: string, consumer: st
 }
 
 async function cleanup(admin: ArbitroClient, consumer: string, stream: string): Promise<void> {
-  try { await admin.deleteConsumer(stream, consumer) } catch {}
-  try { await admin.deleteStream(stream) } catch {}
+  try { await admin.deleteConsumer(stream, consumer) } catch { }
+  try { await admin.deleteStream(stream) } catch { }
   await admin.close()
 }
 
@@ -49,23 +49,23 @@ async function runScenario(maxCredit: number | null): Promise<void> {
 
   const consumerCfg = maxCredit !== null
     ? {
-        name: consumer,
-        filter: subject,
-        ackPolicy: AckPolicy.Explicit,
-        deliverPolicy: DeliverPolicy.All,
-        maxAckPending: 20_000,
-        maxSubjectInflight: maxCredit,
-      }
+      name: consumer,
+      filter: subject,
+      ackPolicy: AckPolicy.Explicit,
+      deliverPolicy: DeliverPolicy.All,
+      maxAckPending: 20_000,
+      maxSubjectInflight: maxCredit,
+    }
     : {
-        name: consumer,
-        filter: subject,
-        ackPolicy: AckPolicy.Explicit,
-        deliverPolicy: DeliverPolicy.All,
-        maxAckPending: 20_000,
-      }
+      name: consumer,
+      filter: subject,
+      ackPolicy: AckPolicy.Explicit,
+      deliverPolicy: DeliverPolicy.All,
+      maxAckPending: 20_000,
+    }
 
   let received = 0
-  const sub = await subClient.subscribe(stream, consumerCfg, (msg) => {
+  const sub = await subClient.subscribe(stream, consumerCfg, async (msg) => {
     received++
     msg.ack()
   })
@@ -100,7 +100,7 @@ async function main(): Promise<void> {
   console.log()
   await runScenario(null)
   await runScenario(500)
-  await runScenario(5)
+  await runScenario(1)
 }
 
 main().catch((e) => { console.error(e); process.exit(1) })

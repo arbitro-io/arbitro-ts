@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { ArbitroClient, JournalType } from '../../src'
-import { Consumer } from '../../src/consumer'
-import { Topic } from '../../src/topic'
-import { schema } from '../../src/utils'
-import { cleanupNamedResources, createClient, uniqueName } from '../helpers/client'
+import { ArbitroClient, JournalType } from '../src'
+import { Consumer } from '../src/consumer'
+import { Topic } from '../src/topic'
+import { schema } from '../src/utils'
+import { cleanupNamedResources, createClient, uniqueName } from './helpers/client'
 
 let client: ArbitroClient
 const created: string[] = []

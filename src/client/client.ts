@@ -3,11 +3,13 @@ import { Subscription } from '../subscription/subscription'
 import { ArbitroError } from '../types/error'
 import { Stream } from '../stream/stream'
 import { Consumer } from '../consumer/consumer'
+import { ClientMetrics, type ClientMetricsSnapshot } from './metrics'
 import { streamPublish, streamPublishAck, streamPublishBatch, streamRequest } from '../stream/publish'
 import {
   packPublish, packCreateStream, packDeleteStream, packGetStream,
   packPurgeStream, packDrainSubject, packListStreams,
   packCreateConsumer, packDeleteConsumer, packGetConsumer, packListConsumers,
+  packConsumerStats,
   type CreateConsumerOpts,
 } from '../proto/v2'
 import { Flag, HEADER_SIZE } from '../proto/constants'
@@ -33,6 +35,7 @@ export class ArbitroClient {
   private readonly tls:    ClientConfig['tls']
   private readonly logger: ClientConfig['logger']
   private readonly sidCache = new Map<string, number>()
+  private readonly _metrics = new ClientMetrics()
 
   constructor(config: ClientConfig) {
     this.cfg    = { ...DEFAULT_CONFIG, ...config }
@@ -46,8 +49,16 @@ export class ArbitroClient {
     this.conn = await Connection.connect(
       addr, this.cfg.timeout, this.tls, this.cfg.reconnect, this.logger,
     )
+    this.conn.setMetrics(this._metrics)
     return this
   }
+
+  /**
+   * Point-in-time snapshot of client counters: publishes sent, deliveries
+   * received, acks/nacks, active subscriptions, reconnects. Cheap — just
+   * reads plain integer fields. Call on a timer to chart throughput.
+   */
+  metrics(): ClientMetricsSnapshot { return this._metrics.snapshot() }
 
   /** Internal connection accessor for Stream/Consumer publish methods. */
   _conn(): Connection { return this.conn }
@@ -57,22 +68,33 @@ export class ArbitroClient {
 
   // ── Publish (direct to stream via V2 PubFrame) ────────────────────────────
 
+  /** Apply prefix to subject if configured. */
+  private prefixed(subject: string): string {
+    return this.cfg.prefix ? `${this.cfg.prefix}.${subject}` : subject
+  }
+
   /** Fire-and-forget publish. Stream must be created/resolved first. */
   publish(streamName: string, subject: string, data: Buffer): void {
     const sid = this.cachedSid(streamName)
-    streamPublish(this.conn, sid, subject, data)
+    streamPublish(this.conn, sid, this.prefixed(subject), data)
+    this._metrics.publishesSent++
   }
 
   /** Publish and wait for server confirmation (RepOk). */
   async publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
     const sid = await this.resolveStreamId(streamName)
-    await streamPublishAck(this.conn, sid, subject, data)
+    await streamPublishAck(this.conn, sid, this.prefixed(subject), data)
+    this._metrics.publishesSent++
   }
 
   /** Batch fire-and-forget — single V2 BatchPubFrame. */
   publishBatch(streamName: string, messages: [subject: string, data: Buffer][]): void {
     const sid = this.cachedSid(streamName)
-    streamPublishBatch(this.conn, sid, messages)
+    const prefixedMsgs = this.cfg.prefix
+      ? messages.map(([s, d]) => [this.prefixed(s), d] as [string, Buffer])
+      : messages
+    streamPublishBatch(this.conn, sid, prefixedMsgs)
+    this._metrics.publishBatchEntries += messages.length
   }
 
   /** Request-reply. */
@@ -114,6 +136,13 @@ export class ArbitroClient {
     const handler = (frame: Buffer) => sub.deliver(frame)
 
     await this.conn.sendSubscribeV2(consumerId, filter, handler)
+    this._metrics.activeSubscriptions++
+    // Best-effort gauge decrement when caller closes the subscription.
+    const origClose = sub.close.bind(sub)
+    sub.close = () => {
+      if (this._metrics.activeSubscriptions > 0) this._metrics.activeSubscriptions--
+      return origClose()
+    }
     if (callback) sub.onMessage(callback)
     return sub
   }
@@ -128,12 +157,12 @@ export class ArbitroClient {
     const maxAgeSecs = BigInt(config.maxAgeMs ? Math.ceil(config.maxAgeMs / 1000) : 0)
     const journalKind = journalTypeToU8(config.journal?.type)
 
-    const refSeq = await this.conn.sendExpectReply(packCreateStream(
+    await this.conn.sendExpectReply(packCreateStream(
       this.conn.nextSeq(), nameBuf, filterBuf,
       maxMsgs, maxBytes, maxAgeSecs,
       1, journalKind, 0, 0,
     ))
-    this.sidCache.set(name, Number(refSeq & 0xFFFFFFFFn))
+    await this.resolveStreamId(name)
     return new Stream(this, name, config)
   }
 
@@ -206,18 +235,27 @@ export class ArbitroClient {
     const group = Buffer.from(config.name ?? streamName)
     const filter = Buffer.from(config.filter ?? '')
 
+    const ackPolicyByte = config.ackPolicy === AckPolicy.None ? 0 : 1
     const opts: CreateConsumerOpts = {
       streamId:      sid,
       name,
       group,
       filter,
       maxInflight:   config.maxAckPending ?? 0,
-      ackPolicy:     config.ackPolicy === AckPolicy.None ? 0 : 1,
+      ackPolicy:     ackPolicyByte,
       deliverPolicy: deliverPolicyToU8(config.deliverPolicy),
       deliverMode:   config.fanout ? 1 : 0,
       ackWaitMs:     config.ackWaitMs ?? 0,
       startSeq:      BigInt(config.startSeq ?? 0),
-      maxSubjectInflight: config.maxSubjectInflight ?? 0,
+    }
+    // Per-subject inflight is only enforced with Explicit ack — drop
+    // the list silently for fire-and-forget consumers so they round-trip
+    // cleanly through the server (which rejects the pairing).
+    if (ackPolicyByte === 1 && config.maxSubjectInflights?.length) {
+      opts.subjectLimits = config.maxSubjectInflights.map(l => ({
+        pattern: Buffer.from(l.pattern),
+        limit:   l.limit >>> 0, // u32
+      }))
     }
 
     const refSeq = await this.conn.sendExpectReply(
@@ -270,6 +308,29 @@ export class ArbitroClient {
 
   async consumerExists(streamName: string, name: string): Promise<boolean> {
     return (await this.getConsumerId(streamName, name)) !== null
+  }
+
+  /**
+   * Live pending-ack count for one consumer — the number of messages the
+   * consumer has been delivered but not yet acked. Equivalent of NATS
+   * JetStream's `num_ack_pending`. Single broker round-trip; engine cost
+   * is one O(1) Vec read per shard.
+   */
+  getPending(consumerId: number): Promise<number>
+  getPending(streamName: string, name: string): Promise<number>
+  async getPending(idOrStream: number | string, name?: string): Promise<number> {
+    let consumerId: number
+    if (typeof idOrStream === 'number') {
+      consumerId = idOrStream
+    } else {
+      const id = await this.getConsumerId(idOrStream, name!)
+      if (id === null) return 0
+      consumerId = id
+    }
+    const refSeq = await this.conn.sendExpectReply(
+      packConsumerStats(this.conn.nextSeq(), consumerId),
+    )
+    return Number(refSeq)
   }
 
   async getConsumerInfo(streamName: string, name: string): Promise<ConsumerInfo | null> {

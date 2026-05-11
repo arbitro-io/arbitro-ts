@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { ArbitroClient, JournalType, schema } from '../../src'
-import type { LazyMessage } from '../../src/topic'
-import { cleanupNamedResources, createClient, uniqueName, waitUntil } from '../helpers/client'
+import { ArbitroClient, JournalType, schema } from '../src'
+import type { LazyMessage } from '../src/topic'
+import { cleanupNamedResources, createClient, uniqueName, waitUntil } from './helpers/client'
 
 let client: ArbitroClient
 const created: string[] = []

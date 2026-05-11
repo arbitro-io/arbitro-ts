@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { Framer } from '../../src/proto/framer'
-import { packPublish } from '../../src/proto/v2'
+import { Framer } from '../src/proto/framer'
+import { packPublish } from '../src/proto/v2'
 
 function makeFrame(): Buffer {
   return packPublish(1n, 0xCAFE, Buffer.from('test'), Buffer.from('payload'))

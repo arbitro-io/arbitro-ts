@@ -8,18 +8,18 @@ Official TypeScript client for the [Arbitro](../arbitro) stateful flow broker.
 - durable streams and consumers
 - exact `stream` / `consumer` introspection and idempotent `upsert`
 - automatic reconnect + subscription reattach in the client
-- subject-level `creditRules`, which are the strongest control feature in the system
+- subject-level `maxSubjectInflights` — the strongest flow-control feature in the system
+- live `ack_pending` queries per consumer
+- client + broker metrics for observability
 
 ## Why Arbitro
 
-The best feature in Arbitro is `creditRules`.
-
-They let you cap in-flight work per subject pattern inside a single consumer group, so one hot subject does not starve the rest of the workload.
+The headline feature is **`maxSubjectInflights`** — per-subject in-flight caps with wildcard patterns inside a single consumer group, so one hot subject does not starve the rest of the workload.
 
 That means you can run one worker pool and still say:
 - `payments.critical` -> max `1`
-- `payments.heavy` -> max `3`
-- `payments.light` -> max `10`
+- `payments.heavy.>` -> max `3`
+- `payments.light.>` -> max `10`
 
 without splitting your topology into many queues just to protect fairness.
 
@@ -97,7 +97,12 @@ const sub = await consumer.subscribe((msg) => {
 })
 ```
 
-## Credit rules
+## Per-subject inflight limits
+
+`maxSubjectInflights` caps the in-flight (delivered, unacked) count per
+subject pattern, with full wildcard support (`*`, `>`). Only enforced
+when `ackPolicy: Explicit`; silently dropped for fire-and-forget
+consumers (the engine doesn't track inflight without acks).
 
 ```typescript
 import { AckPolicy, DeliverPolicy } from 'arbitro-ts'
@@ -108,12 +113,49 @@ await client.createConsumer('orders', {
   ackPolicy: AckPolicy.Explicit,
   deliverPolicy: DeliverPolicy.All,
   maxAckPending: 20_000,
-  creditRules: [
-    { pattern: 'orders.critical', limit: 1 },
-    { pattern: 'orders.heavy',    limit: 3 },
-    { pattern: 'orders.light',    limit: 10 },
+  maxSubjectInflights: [
+    { pattern: 'orders.critical',  limit: 1 },
+    { pattern: 'orders.heavy.>',   limit: 3 },
+    { pattern: 'orders.light.>',   limit: 10 },
   ],
 })
+```
+
+## Query pending acks
+
+Live count of messages delivered to a consumer but not yet acked
+(equivalent of NATS JetStream `num_ack_pending`). One broker round-trip;
+engine cost is O(1) per shard.
+
+```typescript
+// Via Consumer wrapper
+const consumer = await client.stream('orders')
+  .consumer({ name: 'workers' })
+  .create()
+await consumer.getPendings()                     // number
+
+// Or directly via client (when you only have the id, or by name)
+await client.getPending(consumerId)              // number
+await client.getPending('orders', 'workers')     // number (resolves id by name)
+```
+
+## Client metrics
+
+The client tracks atomic counters readable via `client.metrics()`. Use
+it as a saturation gauge for dashboards or alerts.
+
+```typescript
+const snap = client.metrics()
+// {
+//   publishesSent:        12048,
+//   publishBatchEntries:  3210,
+//   deliveriesReceived:   15258,
+//   activeSubscriptions:  7,     // gauge
+//   acksSent:             15101,
+//   nacksSent:            12,
+//   reconnects:           0,
+//   pendingReplies:       0,
+// }
 ```
 
 ## Typed lazy decode

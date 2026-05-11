@@ -5,6 +5,7 @@ export { encodeString, decodeString, encodeJson, decodeJson } from "./utils";
 export { makeLazyMessage, type LazyMessage } from "./topic";
 export { Subscription } from "./subscription";
 export { ArbitroClient } from "./client";
+export type { ClientMetricsSnapshot } from "./client/metrics";
 export { streamId } from "./proto/fnv1a";
 export { Consumer } from "./consumer";
 export { Message } from "./message";
@@ -25,6 +26,7 @@ export type {
   SubscribeOptions,
   ReconnectConfig,
   TlsConfig,
+  SubjectInflightLimit,
 } from "./types";
 
 export {

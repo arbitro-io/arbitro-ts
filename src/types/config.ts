@@ -47,6 +47,20 @@ export interface StreamInfo {
   lastSeq: number
 }
 
+/**
+ * Per-subject inflight cap. Each entry caps the number of in-flight
+ * (delivered, unacked) messages on subjects matching `pattern`. Patterns
+ * may use NATS-style wildcards (`*`, `>`).
+ *
+ * Only enforced when the owning consumer's `ackPolicy` is `Explicit`;
+ * silently dropped server-side for fire-and-forget consumers (because
+ * fire-and-forget bindings skip inflight tracking entirely).
+ */
+export interface SubjectInflightLimit {
+  pattern: string
+  limit:   number
+}
+
 export interface ConsumerConfig {
   name?:                string   // defaults to stream name when created via stream.consumer()
   filter?:              string   // defaults to "${streamName}.>" when created via stream.consumer()
@@ -60,8 +74,11 @@ export interface ConsumerConfig {
   ackWaitMs?:           number
   maxDeliver?:          number
   removeUnusedAfterMs?: number
-  /** Per-subject max inflight (0 = unlimited). Replaces the old credit_rules. */
-  maxSubjectInflight?:  number
+  /**
+   * Per-subject max inflight (list of pattern → limit pairs).
+   * Only effective with `ackPolicy: Explicit`.
+   */
+  maxSubjectInflights?: SubjectInflightLimit[]
 }
 
 export interface ConsumerInfo {

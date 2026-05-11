@@ -87,6 +87,7 @@ export const enum Action {
   DeleteConsumer = 0x0502,
   GetConsumer    = 0x0503,
   ListConsumers  = 0x0504,
+  ConsumerStats  = 0x0505,
 
   // 0x06xx — System
   Ping       = 0x0601,

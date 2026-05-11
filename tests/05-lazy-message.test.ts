@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { makeLazyMessage } from '../../src/topic/lazy-message'
-import { Codec } from '../../src/utils/codec'
+import { makeLazyMessage } from '../src/topic/lazy-message'
+import { Codec } from '../src/utils/codec'
 
 interface Order { id: number; status: string }
 

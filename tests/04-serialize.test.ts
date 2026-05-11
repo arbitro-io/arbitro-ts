@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import {
   packCreateStream, packCreateConsumer, packDeleteStream, packDrainSubject,
-} from '../../src/proto/v2'
-import { Action, HEADER_SIZE, OFF_ACTION } from '../../src/proto/constants'
+} from '../src/proto/v2'
+import { Action, HEADER_SIZE, OFF_ACTION } from '../src/proto/constants'
 
 // Tests for V2 binary frame serialization (replaced V1 msgpack serialization)
 
@@ -59,9 +59,8 @@ describe('packCreateConsumer', () => {
     expect(frame.readUInt16LE(HEADER_SIZE + 14)).toBe(3)  // group_len
     expect(frame.readUInt32LE(HEADER_SIZE + 16)).toBe(30000) // ack_wait_ms
     expect(frame.readBigUInt64LE(HEADER_SIZE + 20)).toBe(42n) // start_seq
-    expect(frame.readUInt32LE(HEADER_SIZE + 28)).toBe(0)  // max_subject_inflight (default)
     // Tail: name + group + filter
-    const tail = frame.subarray(HEADER_SIZE + 32)
+    const tail = frame.subarray(HEADER_SIZE + 28)
     expect(tail.subarray(0, 6).toString()).toBe('worker')
     expect(tail.subarray(6, 9).toString()).toBe('grp')
     expect(tail.subarray(9, 17).toString()).toBe('orders.>')

@@ -45,6 +45,18 @@ export class Consumer {
     return this.client.consumerExists(this.streamName, this.name)
   }
 
+  /**
+   * Live pending-ack count for this consumer (delivered, not yet acked).
+   * Uses the cached consumer ID when available; otherwise looks it up
+   * from `streamName + name`. Equivalent of NATS `num_ack_pending`.
+   */
+  async getPendings(): Promise<number> {
+    if (this._consumerId != null) {
+      return this.client.getPending(this._consumerId)
+    }
+    return this.client.getPending(this.streamName, this.name)
+  }
+
   // Raw subscribe — Message with manual ack/nack/decode.
   subscribe(cb?: RawCallback, opts?: SubscribeOptions): Promise<Subscription>
 

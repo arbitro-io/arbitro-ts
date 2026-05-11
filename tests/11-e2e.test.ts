@@ -25,6 +25,7 @@ describe('end-to-end', () => {
     const received: string[] = []
     const subscription = await sub.subscribe(name, (msg) => received.push(msg.data().toString()))
 
+    await pub.resolveStream(name)
     pub.publish(name, `${name}.event`, Buffer.from('hello'))
     pub.publish(name, `${name}.event`, Buffer.from('world'))
 

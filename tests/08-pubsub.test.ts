@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { ArbitroClient, JournalType } from '../../src'
-import { cleanupNamedResources, createClient, uniqueName, waitUntil } from '../helpers/client'
+import { ArbitroClient, JournalType } from '../src'
+import { cleanupNamedResources, createClient, uniqueName, waitUntil } from './helpers/client'
 
 let client: ArbitroClient
 const created: string[] = []

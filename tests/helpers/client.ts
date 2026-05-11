@@ -25,6 +25,29 @@ export async function cleanupNamedResources(client: ArbitroClient, names: string
   }
 }
 
+/**
+ * Per-test scope cleanup helper. Returns a `track` function that registers
+ * a stream/consumer name for teardown, and a `cleanup` function that
+ * drops everything tracked since the last cleanup. Designed to be wired
+ * to `beforeEach`/`afterEach` so each test starts with a clean broker
+ * — accumulating state across tests is the leading cause of flakiness
+ * (subscriptions from earlier tests can race with new deliveries).
+ */
+export function makeScope(getClient: () => ArbitroClient): {
+  track: (name: string) => string
+  cleanup: () => Promise<void>
+} {
+  let pending: string[] = []
+  return {
+    track: (name) => { pending.push(name); return name },
+    cleanup: async () => {
+      const names = pending
+      pending = []
+      await cleanupNamedResources(getClient(), names)
+    },
+  }
+}
+
 /** Polls `cond` every 20 ms until it returns true or `timeoutMs` elapses. */
 export function waitUntil(cond: () => boolean, timeoutMs = 3_000): Promise<void> {
   return new Promise((resolve, reject) => {
