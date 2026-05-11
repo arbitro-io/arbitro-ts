@@ -20,8 +20,18 @@ export class Consumer {
   get name(): string { return this.config.name ?? this.streamName }
   get consumerId(): number | undefined { return this._consumerId }
 
-  publish(subject: string, data: Buffer): void {
-    this.client.publish(this.streamName, subject, data)
+  /**
+   * Publish through this consumer's stream. Returns `Promise<void>` that
+   * resolves on broker `RepOk`. Await to wait, or ignore for
+   * fire-and-forget semantics.
+   */
+  publish(subject: string, data: Buffer): Promise<void> {
+    return this.client.publish(this.streamName, subject, data)
+  }
+
+  /** Pure fire-and-forget (no broker `RepOk`). */
+  publishNoAck(subject: string, data: Buffer): void {
+    this.client.publishNoAck(this.streamName, subject, data)
   }
 
   async create(): Promise<this> {

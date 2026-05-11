@@ -56,7 +56,24 @@ const sub = await client.subscribe('workers', (msg) => {
   msg.ack()
 })
 
-client.publish('orders.new', Buffer.from('hello'))
+// publish() returns Promise<void> — caller decides whether to await.
+await client.publish('orders', 'orders.new', Buffer.from('hello'))
+```
+
+## Publish modes
+
+```typescript
+// Default — Promise<void>, resolves on broker RepOk.
+// The caller chooses the semantics:
+
+await client.publish('orders', 'orders.new', data)   // wait for broker ack
+client.publish('orders', 'orders.new', data)         // fire-and-forget (don't await)
+client.publish('orders', 'orders.new', data)         //   (errors are silently dropped)
+  .catch(handleError)                                 // or attach a handler
+
+// Pure fire-and-forget — no RepOk wire reply at all.
+// Cheapest path, use for telemetry firehose / fanout-heavy workloads.
+client.publishNoAck('orders', 'orders.new', data)
 ```
 
 ## Durable management

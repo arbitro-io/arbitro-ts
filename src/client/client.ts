@@ -73,18 +73,42 @@ export class ArbitroClient {
     return this.cfg.prefix ? `${this.cfg.prefix}.${subject}` : subject
   }
 
-  /** Fire-and-forget publish. Stream must be created/resolved first. */
-  publish(streamName: string, subject: string, data: Buffer): void {
+  /**
+   * Publish a message. Returns a `Promise<void>` that resolves once the
+   * broker confirms receipt (`RepOk`). The TS idiom is "everything async,
+   * the caller chooses to await":
+   *
+   *   await client.publish(s, subj, data)   // wait for broker ack
+   *   client.publish(s, subj, data)         // fire-and-forget (no await)
+   *   client.publish(s, subj, data).catch(handleError)  // async error path
+   *
+   * For pure fire-and-forget that skips the broker round-trip entirely
+   * (no `RepOk` wire reply at all), use `publishNoAck`.
+   */
+  async publish(streamName: string, subject: string, data: Buffer): Promise<void> {
+    const sid = await this.resolveStreamId(streamName)
+    await streamPublishAck(this.conn, sid, this.prefixed(subject), data)
+    this._metrics.publishesSent++
+  }
+
+  /**
+   * Pure fire-and-forget publish. No `RepOk` is requested — the broker
+   * never sends a wire reply. Cheapest path; use when throughput matters
+   * more than per-message confirmation (e.g. telemetry firehose).
+   */
+  publishNoAck(streamName: string, subject: string, data: Buffer): void {
     const sid = this.cachedSid(streamName)
     streamPublish(this.conn, sid, this.prefixed(subject), data)
     this._metrics.publishesSent++
   }
 
-  /** Publish and wait for server confirmation (RepOk). */
-  async publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
-    const sid = await this.resolveStreamId(streamName)
-    await streamPublishAck(this.conn, sid, this.prefixed(subject), data)
-    this._metrics.publishesSent++
+  /**
+   * @deprecated alias for {@link publish} — kept for migration. The
+   * default `publish` now waits for the broker `RepOk` and returns a
+   * Promise, so this method is now identical.
+   */
+  publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
+    return this.publish(streamName, subject, data)
   }
 
   /** Batch fire-and-forget — single V2 BatchPubFrame. */

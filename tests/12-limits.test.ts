@@ -53,7 +53,15 @@ describe('ConsumerConfig limits', () => {
   // server-side for fire-and-forget consumers.
 
   it('maxSubjectInflights with wildcard patterns and uncapped subjects', async () => {
+
+
     const name = scope.track(uniqueName('lim'))
+
+    const PREMIUM_LIMIT = 2;
+    const FREEMIUM_LIMIT = 1;
+    const OTHERS_COUNT = 3;
+
+
     await client.createStream(name, {
       subjectFilter: `${name}.>`,
       journal: { type: JournalType.Memory },
@@ -64,8 +72,8 @@ describe('ConsumerConfig limits', () => {
       ackPolicy: AckPolicy.Explicit,
       maxAckPending: 100,
       maxSubjectInflights: [
-        { pattern: `${name}.premium.>`,  limit: 3 },
-        { pattern: `${name}.freemium.>`, limit: 1 },
+        { pattern: `${name}.premium.>`, limit: PREMIUM_LIMIT },
+        { pattern: `${name}.freemium.>`, limit: FREEMIUM_LIMIT },
       ],
     })
 
@@ -78,21 +86,21 @@ describe('ConsumerConfig limits', () => {
     })
 
     // Burst: 3 other (uncapped), 3 freemium (cap 1), 5 premium (cap 3).
-    for (let i = 0; i < 3; i++) client.publish(name, `${name}.other.x`, Buffer.from(`O${i}`))
+    for (let i = 0; i < OTHERS_COUNT; i++) client.publish(name, `${name}.other.x`, Buffer.from(`O${i}`))
     for (let i = 0; i < 3; i++) client.publish(name, `${name}.freemium.events`, Buffer.from(`F${i}`))
     for (let i = 0; i < 5; i++) client.publish(name, `${name}.premium.orders`, Buffer.from(`P${i}`))
 
     // Settle window — let the broker push everything it's allowed to.
-    await new Promise((r) => setTimeout(r, 300))
+    await waitUntil(() => received.length >= 6)
 
     const premium = received.filter((m) => m.subject.includes('.premium.')).length
     const freemium = received.filter((m) => m.subject.includes('.freemium.')).length
     const other = received.filter((m) => m.subject.includes('.other.')).length
 
-    expect(premium).toBe(3)    // capped at 3
-    expect(freemium).toBe(1)   // capped at 1
-    expect(other).toBe(3)      // no cap
-    expect(received.length).toBe(7)
+    expect(premium).toBe(PREMIUM_LIMIT)    // capped at 3
+    expect(freemium).toBe(FREEMIUM_LIMIT)   // capped at 1
+    expect(other).toBe(OTHERS_COUNT)      // no cap
+    expect(received.length).toBe(PREMIUM_LIMIT + FREEMIUM_LIMIT + OTHERS_COUNT)
 
     received.forEach((r) => r.ack())
     sub.close()
