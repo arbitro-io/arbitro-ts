@@ -40,3 +40,9 @@ export {
   type FieldTypeMap,
   type InferSchema,
 } from "./utils";
+
+// `zodCodec` lives next to the other codecs in the main export.
+// Zod is referenced only via `import type` in `utils/zod.ts`, so this
+// re-export adds zero runtime dependency on zod for users who never
+// call zodCodec — TypeScript strips the type imports at compile time.
+export { zodCodec } from "./utils/zod";

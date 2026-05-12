@@ -15,14 +15,14 @@ type DeliveryHandler = (frame: Buffer) => void
 
 interface PendingMgmt {
   resolve: (frame: Buffer) => void
-  reject:  (err: Error) => void
+  reject: (err: Error) => void
 }
 
 interface ActiveSubscription {
   consumerId: number
-  filter:     Buffer
-  handler:    DeliveryHandler
-  onRenew:    ((newConsumerId: number) => void) | undefined
+  filter: Buffer
+  handler: DeliveryHandler
+  onRenew: ((newConsumerId: number) => void) | undefined
 }
 
 function parseAddr(addr: string): { host: string; port: number } {
@@ -33,41 +33,41 @@ function parseAddr(addr: string): { host: string; port: number } {
 }
 
 export class Connection {
-  private seq             = 1n
-  private connId          = 0
-  private framer          = new Framer()
-  private routes          = new Map<number, DeliveryHandler>()
-  private pending         = new Map<bigint, PendingMgmt>()
-  private socket:         net.Socket
-  private closing         = false
-  private readonly log:   Logger
-  private activeSubs      = new Map<number, ActiveSubscription>()
-  private metrics?:       ClientMetrics
+  private seq = 1n
+  private connId = 0
+  private framer = new Framer()
+  private routes = new Map<number, DeliveryHandler>()
+  private pending = new Map<bigint, PendingMgmt>()
+  private socket: net.Socket
+  private closing = false
+  private readonly log: Logger
+  private activeSubs = new Map<number, ActiveSubscription>()
+  private metrics?: ClientMetrics
 
   private constructor(
     socket: net.Socket,
     private readonly reconnectAddr?: { host: string; port: number },
-    private readonly reconnectCfg?:  ReconnectConfig,
+    private readonly reconnectCfg?: ReconnectConfig,
     logger?: Logger,
   ) {
-    this.log    = resolveLogger(logger)
+    this.log = resolveLogger(logger)
     this.socket = socket
     this.attachSocket(socket)
   }
 
   private attachSocket(socket: net.Socket): void {
     socket.setNoDelay(true)
-    socket.on('data',  (chunk: Buffer) => this.framer.push(chunk, (f) => this.onFrame(f)))
-    socket.on('error', (err)           => this.drain(err))
-    socket.on('close', ()              => this.handleClose())
+    socket.on('data', (chunk: Buffer) => this.framer.push(chunk, (f) => this.onFrame(f)))
+    socket.on('error', (err) => this.drain(err))
+    socket.on('close', () => this.handleClose())
   }
 
   static connect(
-    addr:         string,
-    timeoutMs   = 5_000,
-    tlsCfg?:      TlsConfig,
+    addr: string,
+    timeoutMs = 5_000,
+    tlsCfg?: TlsConfig,
     reconnectCfg?: ReconnectConfig,
-    logger?:      Logger,
+    logger?: Logger,
   ): Promise<Connection> {
     const parsed = parseAddr(addr)
     const { host, port } = parsed
@@ -88,9 +88,9 @@ export class Connection {
       if (tlsCfg) {
         const s = tls.connect({
           host, port,
-          ca:                 tlsCfg.ca,
-          cert:               tlsCfg.cert,
-          key:                tlsCfg.key,
+          ca: tlsCfg.ca,
+          cert: tlsCfg.cert,
+          key: tlsCfg.key,
           rejectUnauthorized: true,
         })
         s.once('secureConnect', () => done(s))
@@ -180,22 +180,22 @@ export class Connection {
 
     for (let i = 0; i < count; i++) {
       if (off + 24 > frame.length) break
-      const consumerId  = frame.readUInt32LE(off)
-      const deliverSeq  = frame.readBigUInt64LE(off + 4)
-      const subjectLen  = frame.readUInt16LE(off + 12)
-      const replyLen    = frame.readUInt16LE(off + 14)
-      const dataLen     = frame.readUInt32LE(off + 16)
+      const consumerId = frame.readUInt32LE(off)
+      const deliverSeq = frame.readBigUInt64LE(off + 4)
+      const subjectLen = frame.readUInt16LE(off + 12)
+      const replyLen = frame.readUInt16LE(off + 14)
+      const dataLen = frame.readUInt32LE(off + 16)
       const subjectHash = frame.readUInt32LE(off + 20)
       off += 24
 
-      const tailEnd    = off + dataLen
+      const tailEnd = off + dataLen
       if (tailEnd > frame.length) break
       const payloadLen = dataLen - subjectLen - replyLen
 
       const handler = this.routes.get(consumerId)
       if (handler) {
         const bodyLen = 12 + subjectLen + payloadLen
-        const single  = Buffer.allocUnsafe(HEADER_SIZE + bodyLen)
+        const single = Buffer.allocUnsafe(HEADER_SIZE + bodyLen)
         single.writeUInt16LE(Action.Deliver, 0)
         single[2] = 0; single[3] = 0
         single.writeUInt32LE(bodyLen, 4)
@@ -218,12 +218,12 @@ export class Connection {
 
   async sendSubscribeV2(
     consumerId: number,
-    filter:     Buffer,
-    handler:    DeliveryHandler,
-    onRenew?:   (newConsumerId: number) => void,
+    filter: Buffer,
+    handler: DeliveryHandler,
+    onRenew?: (newConsumerId: number) => void,
   ): Promise<number> {
     return new Promise((resolve, reject) => {
-      const seq   = this.nextSeq()
+      const seq = this.nextSeq()
       const timer = setTimeout(
         () => { this.pending.delete(seq); reject(new ArbitroError('subscribe timeout', 'timeout')) },
         5_000,
@@ -255,7 +255,7 @@ export class Connection {
     for (const { consumerId, filter, handler, onRenew } of subs) {
       this.sendSubscribeV2(consumerId, filter, handler, onRenew)
         .then((id) => { if (onRenew) onRenew(id) })
-        .catch(() => {})
+        .catch(() => { })
     }
   }
 
@@ -304,7 +304,7 @@ export class Connection {
       )
       this.pending.set(seq, {
         resolve: (f) => { clearTimeout(timer); resolve(f) },
-        reject:  (e) => { clearTimeout(timer); reject(e) },
+        reject: (e) => { clearTimeout(timer); reject(e) },
       })
       this.socket.write(frame)
     })
@@ -340,9 +340,9 @@ export class Connection {
       this.log.warn({ attempt }, 'reconnect exhausted')
       return
     }
-    const base   = cfg.intervalMs ?? 500
+    const base = cfg.intervalMs ?? 500
     const jitter = cfg.jitter !== false ? Math.random() * 100 : 0
-    const delay  = Math.min(base * 2 ** attempt, 30_000) + jitter
+    const delay = Math.min(base * 2 ** attempt, 30_000) + jitter
     this.log.debug({ attempt, delayMs: Math.round(delay) }, 'reconnecting')
     setTimeout(() => {
       const { host, port } = this.reconnectAddr!

@@ -3,6 +3,7 @@ import type { StreamConfig, ConsumerConfig, DeleteStreamOpts, StreamInfo } from 
 import type { Encoding } from '../utils/codec'
 import { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
+import { BatchPublishEntry } from '../proto/publish'
 
 // Stream — context object carrying name + config.
 // No network calls at construction — only at .create(), .upsert(), and .delete().
@@ -63,8 +64,14 @@ export class Stream {
     return this.client.publish(this.name, subject, data)
   }
 
-  publishBatch(messages: [subject: string, data: Buffer][]): void {
-    this.client.publishBatch(this.name, messages)
+  /** Batch publish — single V2 BatchPubFrame, ONE round-trip.
+   *  Resolves with `first_seq` (the N messages occupy
+   *  `[first_seq, first_seq + N - 1]`).
+   *
+   *  Like {@link publish}, the call always exchanges request/response
+   *  with the broker; the caller decides whether to wait via `await`. */
+  publishBatch(messages: BatchPublishEntry[]): Promise<bigint> {
+    return this.client.publishBatch(this.name, messages)
   }
 
   request(subject: string, data: Buffer, timeoutMs?: number): Promise<Buffer> {
@@ -76,7 +83,7 @@ export class Stream {
   consumer(overrides?: Partial<ConsumerConfig>): Consumer {
     const config: ConsumerConfig = {
       ...overrides,
-      name:   overrides?.name   ?? this.name,
+      name: overrides?.name ?? this.name,
       filter: overrides?.filter ?? `${this.name}.>`,
     }
     return new Consumer(this.client, this.name, config)

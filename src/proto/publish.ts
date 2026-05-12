@@ -3,6 +3,11 @@
 import { HEADER_SIZE, Action } from './constants'
 import { frame } from './frame'
 
+export interface BatchPublishEntry {
+  subject: string
+  payload: Buffer
+}
+
 // Body: stream_id(4) + subject_len(2) + _pad(2) = 8B + subject + payload
 export function packPublish(
   seq: bigint, streamId: number,
@@ -40,7 +45,7 @@ export function packPublishWithReply(
 // Body: stream_id(4) + count(4) = 8B + entries[subject_len(2)+_pad(2)+payload_len(4)+subject+payload]
 export function packPublishBatch(
   seq: bigint, streamId: number,
-  entries: ReadonlyArray<{ subject: Buffer; payload: Buffer }>,
+  entries: ReadonlyArray<BatchPublishEntry>,
   flags = 0, entryFlags = 0,
 ): Buffer {
   let tail = 0
@@ -54,7 +59,7 @@ export function packPublishBatch(
     buf.writeUInt16LE(0, off + 2)
     buf.writeUInt32LE(e.payload.length, off + 4)
     off += 8
-    e.subject.copy(buf, off); off += e.subject.length
+    buf.write(e.subject, off); off += e.subject.length
     e.payload.copy(buf, off); off += e.payload.length
   }
   return buf

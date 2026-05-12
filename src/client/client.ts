@@ -19,27 +19,28 @@ import type {
 } from '../types/config'
 import { AckPolicy, DeliverPolicy, JournalType } from '../types/config'
 import { Message } from '../message/message'
+import { BatchPublishEntry } from '../proto/publish'
 
 type MsgCallback = (msg: Message) => void
 
 const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger'>> = {
-  servers:   ['127.0.0.1:9898'],
-  prefix:    '',
-  timeout:   5_000,
+  servers: ['127.0.0.1:9898'],
+  prefix: '',
+  timeout: 5_000,
   reconnect: { enabled: true, maxAttempts: 10, intervalMs: 500, jitter: true },
 }
 
 export class ArbitroClient {
   private conn!: Connection
   private readonly cfg: typeof DEFAULT_CONFIG
-  private readonly tls:    ClientConfig['tls']
+  private readonly tls: ClientConfig['tls']
   private readonly logger: ClientConfig['logger']
   private readonly sidCache = new Map<string, number>()
   private readonly _metrics = new ClientMetrics()
 
   constructor(config: ClientConfig) {
-    this.cfg    = { ...DEFAULT_CONFIG, ...config }
-    this.tls    = config.tls
+    this.cfg = { ...DEFAULT_CONFIG, ...config }
+    this.tls = config.tls
     this.logger = config.logger
   }
 
@@ -101,14 +102,25 @@ export class ArbitroClient {
     return this.publish(streamName, subject, data)
   }
 
-  /** Batch fire-and-forget — single V2 BatchPubFrame. */
-  publishBatch(streamName: string, messages: [subject: string, data: Buffer][]): void {
+  /** Batch publish — single V2 BatchPubFrame, ONE round-trip. Resolves
+   * to `first_seq` (sequence of the first message in the batch; the N
+   * messages occupy `[first_seq, first_seq + N - 1]`).
+   *
+   * Mirrors `publish`: the call always exchanges request/response with
+   * the broker. The caller decides whether to actually wait:
+   *
+   *   await client.publishBatch(stream, msgs)   // barrier
+   *   client.publishBatch(stream, msgs)         // fire-and-forget (promise dropped)
+   *   client.publishBatch(stream, msgs)         //   (suppress unhandled rejection)
+   *     .catch(() => {})
+   */
+  publishBatch(streamName: string, messages: BatchPublishEntry[]): Promise<bigint> {
     const sid = this.cachedSid(streamName)
     const prefixedMsgs = this.cfg.prefix
-      ? messages.map(([s, d]) => [this.prefixed(s), d] as [string, Buffer])
+      ? messages.map((m) => ({ subject: this.prefixed(m.subject), payload: m.payload }))
       : messages
-    streamPublishBatch(this.conn, sid, prefixedMsgs)
     this._metrics.publishBatchEntries += messages.length
+    return streamPublishBatch(this.conn, sid, prefixedMsgs)
   }
 
   /** Request-reply. */
@@ -135,13 +147,13 @@ export class ArbitroClient {
     let subOpts: SubscribeOptions | undefined
 
     if (typeof configOrCb === 'function') {
-      config   = { name: streamName, filter: '' }
+      config = { name: streamName, filter: '' }
       callback = configOrCb
-      subOpts  = undefined
+      subOpts = undefined
     } else {
-      config   = configOrCb
+      config = configOrCb
       callback = typeof callbackOrOpts === 'function' ? callbackOrOpts : undefined
-      subOpts  = typeof callbackOrOpts === 'object' ? callbackOrOpts : opts
+      subOpts = typeof callbackOrOpts === 'object' ? callbackOrOpts : opts
     }
 
     const consumerId = await this.ensureConsumer(streamName, config)
@@ -164,10 +176,10 @@ export class ArbitroClient {
   // ── Stream management ─────────────────────────────────────────────────────
 
   async createStream(name: string, config: StreamConfig): Promise<Stream> {
-    const nameBuf   = Buffer.from(name)
+    const nameBuf = Buffer.from(name)
     const filterBuf = Buffer.from(config.subjectFilter ?? '')
-    const maxMsgs   = BigInt(config.maxMsgs ?? 0)
-    const maxBytes  = BigInt(config.maxBytes ?? 0)
+    const maxMsgs = BigInt(config.maxMsgs ?? 0)
+    const maxBytes = BigInt(config.maxBytes ?? 0)
     const maxAgeSecs = BigInt(config.maxAgeMs ? Math.ceil(config.maxAgeMs / 1000) : 0)
     const journalKind = journalTypeToU8(config.journal?.type)
 
@@ -244,23 +256,23 @@ export class ArbitroClient {
   }
 
   private async createConsumerRaw(streamName: string, config: ConsumerConfig): Promise<number> {
-    const sid  = await this.resolveStreamId(streamName)
+    const sid = await this.resolveStreamId(streamName)
     const name = Buffer.from(config.name ?? streamName)
     const group = Buffer.from(config.name ?? streamName)
     const filter = Buffer.from(config.filter ?? '')
 
     const ackPolicyByte = config.ackPolicy === AckPolicy.None ? 0 : 1
     const opts: CreateConsumerOpts = {
-      streamId:      sid,
+      streamId: sid,
       name,
       group,
       filter,
-      maxInflight:   config.maxAckPending ?? 0,
-      ackPolicy:     ackPolicyByte,
+      maxInflight: config.maxAckPending ?? 0,
+      ackPolicy: ackPolicyByte,
       deliverPolicy: deliverPolicyToU8(config.deliverPolicy),
-      deliverMode:   config.fanout ? 1 : 0,
-      ackWaitMs:     config.ackWaitMs ?? 0,
-      startSeq:      BigInt(config.startSeq ?? 0),
+      deliverMode: config.fanout ? 1 : 0,
+      ackWaitMs: config.ackWaitMs ?? 0,
+      startSeq: BigInt(config.startSeq ?? 0),
     }
     // Per-subject inflight is only enforced with Explicit ack — drop
     // the list silently for fire-and-forget consumers so they round-trip
@@ -268,7 +280,7 @@ export class ArbitroClient {
     if (ackPolicyByte === 1 && config.maxSubjectInflights?.length) {
       opts.subjectLimits = config.maxSubjectInflights.map(l => ({
         pattern: Buffer.from(l.pattern),
-        limit:   l.limit >>> 0, // u32
+        limit: l.limit >>> 0, // u32
       }))
     }
 
@@ -422,7 +434,7 @@ function parseListStreamsReply(frame: Buffer): StreamInfo[] {
   let off = HEADER_SIZE + 4
   for (let i = 0; i < count; i++) {
     if (off + 6 > frame.length) break
-    const wireId  = frame.readUInt32LE(off)
+    const wireId = frame.readUInt32LE(off)
     const nameLen = frame.readUInt16LE(off + 4)
     off += 6
     const name = frame.subarray(off, off + nameLen).toString()
@@ -441,9 +453,9 @@ function parseListConsumersReply(frame: Buffer): ConsumerInfo[] {
   for (let i = 0; i < count; i++) {
     if (off + 13 > frame.length) break
     const consumerId = frame.readUInt32LE(off)
-    const _streamId  = frame.readUInt32LE(off + 4)
-    const _queueId   = frame.readUInt32LE(off + 8)
-    const _paused    = frame[off + 12]
+    const _streamId = frame.readUInt32LE(off + 4)
+    const _queueId = frame.readUInt32LE(off + 8)
+    const _paused = frame[off + 12]
     off += 13
     results.push({
       group: consumerId.toString(),
@@ -456,19 +468,19 @@ function parseListConsumersReply(frame: Buffer): ConsumerInfo[] {
 
 function deliverPolicyToU8(policy?: DeliverPolicy): number {
   switch (policy) {
-    case DeliverPolicy.All:      return 0
-    case DeliverPolicy.New:      return 1
-    case DeliverPolicy.BySeq:    return 2
-    case DeliverPolicy.ByTime:   return 3
+    case DeliverPolicy.All: return 0
+    case DeliverPolicy.New: return 1
+    case DeliverPolicy.BySeq: return 2
+    case DeliverPolicy.ByTime: return 3
     default: return 0
   }
 }
 
 function journalTypeToU8(type?: JournalType): number {
   switch (type) {
-    case JournalType.Memory:   return 0
+    case JournalType.Memory: return 0
     case JournalType.Tolerant: return 1
-    case JournalType.Strict:   return 2
+    case JournalType.Strict: return 2
     default: return 0
   }
 }

@@ -31,11 +31,6 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
-    },
-    "./zod": {
-      "types": "./dist/zod.d.ts",
-      "import": "./dist/zod.mjs",
-      "require": "./dist/zod.js"
     }
   },
   "files": [
