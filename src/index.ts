@@ -1,6 +1,9 @@
 /// <reference types="node" />
 
-export { DeliverPolicy, JournalType, AckPolicy, ArbitroError } from "./types";
+export { DeliverPolicy, JournalType, AckPolicy, ArbitroError, ErrorCode } from "./types";
+export type { ErrorCodeValue } from "./types";
+export type { PublishOpts } from "./stream/publish";
+export type { BatchPublishEntry } from "./proto/publish";
 export { encodeString, decodeString, encodeJson, decodeJson } from "./utils";
 export { makeLazyMessage, type LazyMessage } from "./topic";
 export { Subscription } from "./subscription";

@@ -57,9 +57,9 @@ describe('client metrics', () => {
 
     const before = client.metrics()
     client.publishBatch(name, [
-      [`${name}.a`, Buffer.from('1')],
-      [`${name}.b`, Buffer.from('2')],
-      [`${name}.c`, Buffer.from('3')],
+      { subject: `${name}.a`, payload: Buffer.from('1') },
+      { subject: `${name}.b`, payload: Buffer.from('2') },
+      { subject: `${name}.c`, payload: Buffer.from('3') },
     ])
     const after = client.metrics()
     expect(after.publishBatchEntries).toBe(before.publishBatchEntries + 3)

@@ -3,21 +3,42 @@ import { Flag } from '../proto/constants'
 import type { Connection } from '../net/connection'
 import { BatchPublishEntry } from '../proto/publish'
 
+const EMPTY = Buffer.alloc(0)
+
+/**
+ * Optional per-publish options.
+ *
+ * `msgId` is an opaque byte string the broker uses for dedup when the
+ * target stream was created with `idempotencyWindowMs > 0`. Empty or
+ * undefined means "no dedup for this publish" — safe to omit on
+ * non-idempotent streams.
+ */
+export interface PublishOpts {
+  msgId?: Buffer | string
+}
+
+function toMsgIdBuf(id: PublishOpts['msgId']): Buffer {
+  if (id == null) return EMPTY
+  return typeof id === 'string' ? Buffer.from(id) : id
+}
+
 /** Fire-and-forget publish. Caller provides pre-resolved stream_id. */
 export function streamPublish(
   conn: Connection, sid: number, subject: string, data: Buffer,
+  opts?: PublishOpts,
 ): void {
   const subj = Buffer.from(subject)
-  conn.send(packPublish(conn.nextSeq(), sid, subj, data))
+  conn.send(packPublish(conn.nextSeq(), sid, subj, data, 0, 0, toMsgIdBuf(opts?.msgId)))
 }
 
 /** Publish + wait for server RepOk confirmation. */
 export async function streamPublishAck(
   conn: Connection, sid: number, subject: string, data: Buffer,
+  opts?: PublishOpts,
 ): Promise<void> {
   const subj = Buffer.from(subject)
   await conn.sendExpectReply(
-    packPublish(conn.nextSeq(), sid, subj, data, Flag.AckReq),
+    packPublish(conn.nextSeq(), sid, subj, data, Flag.AckReq, 0, toMsgIdBuf(opts?.msgId)),
   )
 }
 

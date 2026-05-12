@@ -132,7 +132,8 @@ export class Connection {
       ? frame.readUInt16LE(HEADER_SIZE + 8)
       : 0
     p.reject(new ArbitroError(
-      `server error (code=${errorCode})`, 'server', undefined, undefined,
+      `server error (code=0x${errorCode.toString(16).padStart(4, '0')})`,
+      'server', undefined, undefined, errorCode,
     ))
   }
 

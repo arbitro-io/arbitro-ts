@@ -88,9 +88,12 @@ export class ArbitroClient {
    * semantics. A "no-reply" path doesn't save wire bytes, so it isn't
    * exposed.
    */
-  async publish(streamName: string, subject: string, data: Buffer): Promise<void> {
+  async publish(
+    streamName: string, subject: string, data: Buffer,
+    opts?: import('../stream/publish').PublishOpts,
+  ): Promise<void> {
     const sid = await this.resolveStreamId(streamName)
-    await streamPublishAck(this.conn, sid, this.prefixed(subject), data)
+    await streamPublishAck(this.conn, sid, this.prefixed(subject), data, opts)
     this._metrics.publishesSent++
   }
 
@@ -98,8 +101,11 @@ export class ArbitroClient {
    * @deprecated alias for {@link publish}. The default `publish` already
    * waits for `RepOk` and returns a Promise, so this method is identical.
    */
-  publishAck(streamName: string, subject: string, data: Buffer): Promise<void> {
-    return this.publish(streamName, subject, data)
+  publishAck(
+    streamName: string, subject: string, data: Buffer,
+    opts?: import('../stream/publish').PublishOpts,
+  ): Promise<void> {
+    return this.publish(streamName, subject, data, opts)
   }
 
   /** Batch publish — single V2 BatchPubFrame, ONE round-trip. Resolves
@@ -113,11 +119,24 @@ export class ArbitroClient {
    *   client.publishBatch(stream, msgs)         // fire-and-forget (promise dropped)
    *   client.publishBatch(stream, msgs)         //   (suppress unhandled rejection)
    *     .catch(() => {})
+   *
+   * Each entry may carry an optional `msgId` for broker-side dedup on
+   * streams created with `idempotencyWindowMs > 0`. If any entry
+   * collides with a previously-stored id (or another entry in the
+   * SAME batch), the whole batch is rejected — `publishBatch` is
+   * atomic.
    */
   publishBatch(streamName: string, messages: BatchPublishEntry[]): Promise<bigint> {
     const sid = this.cachedSid(streamName)
-    const prefixedMsgs = this.cfg.prefix
-      ? messages.map((m) => ({ subject: this.prefixed(m.subject), payload: m.payload }))
+    const prefixedMsgs: BatchPublishEntry[] = this.cfg.prefix
+      ? messages.map((m): BatchPublishEntry => {
+          const entry: BatchPublishEntry = {
+            subject: this.prefixed(m.subject),
+            payload: m.payload,
+          }
+          if (m.msgId !== undefined) entry.msgId = m.msgId
+          return entry
+        })
       : messages
     this._metrics.publishBatchEntries += messages.length
     return streamPublishBatch(this.conn, sid, prefixedMsgs)
@@ -187,6 +206,7 @@ export class ArbitroClient {
       this.conn.nextSeq(), nameBuf, filterBuf,
       maxMsgs, maxBytes, maxAgeSecs,
       1, journalKind, 0, 0,
+      config.idempotencyWindowMs ?? 0,
     ))
     await this.resolveStreamId(name)
     return new Stream(this, name, config)

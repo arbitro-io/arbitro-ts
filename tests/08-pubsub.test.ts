@@ -44,9 +44,9 @@ describe('publish/subscribe', () => {
     const sub = await client.subscribe(name, (msg) => received.push(msg.data().toString()))
 
     client.publishBatch(name, [
-      [`${name}.e`, Buffer.from('a')],
-      [`${name}.e`, Buffer.from('b')],
-      [`${name}.e`, Buffer.from('c')],
+      { subject: `${name}.e`, payload: Buffer.from('a') },
+      { subject: `${name}.e`, payload: Buffer.from('b') },
+      { subject: `${name}.e`, payload: Buffer.from('c') },
     ])
     await waitUntil(() => received.length >= 3)
     sub.close()

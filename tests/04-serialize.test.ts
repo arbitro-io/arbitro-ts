@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   packCreateStream, packCreateConsumer, packDeleteStream, packDrainSubject,
+  packPublish, packPublishBatch,
 } from '../src/proto/v2'
 import { Action, HEADER_SIZE, OFF_ACTION } from '../src/proto/constants'
 
@@ -20,17 +21,28 @@ describe('packCreateStream', () => {
     expect(frame.readBigUInt64LE(HEADER_SIZE + 20)).toBe(3600n)  // max_age_secs
     expect(frame[HEADER_SIZE + 28]).toBe(1)  // replicas
     expect(frame[HEADER_SIZE + 29]).toBe(1)  // journal_kind
-    // Tail: name + filter
-    const tail = frame.subarray(HEADER_SIZE + 32)
+    expect(frame.readUInt32LE(HEADER_SIZE + 32)).toBe(0) // idempotency_window_ms (default)
+    // Tail: name + filter (fixed body is now 40B)
+    const tail = frame.subarray(HEADER_SIZE + 40)
     expect(tail.subarray(0, 6).toString()).toBe('orders')
     expect(tail.subarray(6, 14).toString()).toBe('orders.>')
   })
 
-  it('total frame size = HEADER_SIZE + 32 + name_len + filter_len', () => {
+  it('total frame size = HEADER_SIZE + 40 + name_len + filter_len', () => {
     const name = Buffer.from('x')
     const filter = Buffer.from('y')
     const frame = packCreateStream(1n, name, filter, 0n, 0n, 0n)
-    expect(frame.length).toBe(HEADER_SIZE + 32 + 1 + 1)
+    expect(frame.length).toBe(HEADER_SIZE + 40 + 1 + 1)
+  })
+
+  it('idempotency_window_ms is written when provided', () => {
+    const frame = packCreateStream(
+      1n, Buffer.from('dedup'), Buffer.from('>'),
+      0n, 0n, 0n, 1, 0, 0, 0,
+      /*idempotencyWindowMs*/ 60_000,
+    )
+    expect(frame.readUInt32LE(HEADER_SIZE + 32)).toBe(60_000)
+    expect(frame.readUInt32LE(HEADER_SIZE + 36)).toBe(0) // _pad
   })
 })
 
@@ -73,6 +85,65 @@ describe('packDeleteStream', () => {
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.DeleteStream)
     expect(frame.readUInt16LE(HEADER_SIZE)).toBe(10)  // name_len
     expect(frame.subarray(HEADER_SIZE + 8).toString()).toBe('old-stream')
+  })
+})
+
+describe('packPublish — msg_id wire layout', () => {
+  it('default (no msgId) writes msg_id_len = 0 and tail = subject||payload', () => {
+    const frame = packPublish(
+      1n, 0xDEADBEEF, Buffer.from('orders.new'), Buffer.from('payload'),
+    )
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(0xDEADBEEF)
+    expect(frame.readUInt16LE(HEADER_SIZE + 4)).toBe(10) // subject_len = 'orders.new'
+    expect(frame.readUInt16LE(HEADER_SIZE + 6)).toBe(0)  // msg_id_len  = 0
+    const tail = frame.subarray(HEADER_SIZE + 8)
+    expect(tail.subarray(0, 10).toString()).toBe('orders.new')
+    expect(tail.subarray(10).toString()).toBe('payload')
+  })
+
+  it('with msgId places it between subject and payload', () => {
+    const frame = packPublish(
+      2n, 0x1234, Buffer.from('k'), Buffer.from('data'),
+      0, 0, Buffer.from('msg-id-x'),
+    )
+    expect(frame.readUInt16LE(HEADER_SIZE + 4)).toBe(1) // subject_len
+    expect(frame.readUInt16LE(HEADER_SIZE + 6)).toBe(8) // msg_id_len = 'msg-id-x'
+    const tail = frame.subarray(HEADER_SIZE + 8)
+    expect(tail.subarray(0, 1).toString()).toBe('k')
+    expect(tail.subarray(1, 9).toString()).toBe('msg-id-x')
+    expect(tail.subarray(9, 13).toString()).toBe('data')
+  })
+})
+
+describe('packPublishBatch — per-entry msg_id', () => {
+  it('writes msg_id_len per entry and lays out msg_id between subject and payload', () => {
+    // Mixing: one entry with msgId, one without.
+    const entries = [
+      { subject: 'k.a', msgId: Buffer.from('id-1'), payload: Buffer.from('A') },
+      { subject: 'k.b', payload: Buffer.from('BB') },
+    ]
+    const frame = packPublishBatch(1n, 7, entries)
+    expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.PublishBatch)
+    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(7)
+    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(2) // count
+
+    // Entry 0
+    let off = HEADER_SIZE + 8
+    expect(frame.readUInt16LE(off)).toBe(3)          // subject_len = 'k.a'
+    expect(frame.readUInt16LE(off + 2)).toBe(4)      // msg_id_len  = 'id-1'
+    expect(frame.readUInt32LE(off + 4)).toBe(1)      // payload_len = 1
+    off += 8
+    expect(frame.subarray(off, off + 3).toString()).toBe('k.a');  off += 3
+    expect(frame.subarray(off, off + 4).toString()).toBe('id-1'); off += 4
+    expect(frame.subarray(off, off + 1).toString()).toBe('A');    off += 1
+
+    // Entry 1 — no msg_id
+    expect(frame.readUInt16LE(off)).toBe(3)          // subject_len = 'k.b'
+    expect(frame.readUInt16LE(off + 2)).toBe(0)      // msg_id_len  = 0
+    expect(frame.readUInt32LE(off + 4)).toBe(2)      // payload_len = 2
+    off += 8
+    expect(frame.subarray(off, off + 3).toString()).toBe('k.b'); off += 3
+    expect(frame.subarray(off, off + 2).toString()).toBe('BB')
   })
 })
 

@@ -35,6 +35,20 @@ export interface StreamConfig {
   maxMsgs?:       number
   maxBytes?:      number
   maxAgeMs?:      number
+  /**
+   * Per-stream broker-side dedup window in milliseconds.
+   *
+   * - `0` or undefined (default): no dedup. Every publish is stored;
+   *   `msgId` is ignored.
+   * - `>0`: any publish that carries a `msgId` matching one the
+   *   broker has stored for THIS stream within the last
+   *   `idempotencyWindowMs` is rejected with the `IdempotencyDuplicate`
+   *   wire error. Useful for safe retries — the first publish wins.
+   *
+   * The broker clamps requested windows above 5 minutes (300 000 ms)
+   * down to that ceiling, matching JetStream behaviour.
+   */
+  idempotencyWindowMs?: number
 }
 
 export interface DeleteStreamOpts {

@@ -4,6 +4,7 @@ import type { Encoding } from '../utils/codec'
 import { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
 import { BatchPublishEntry } from '../proto/publish'
+import type { PublishOpts } from './publish'
 
 // Stream — context object carrying name + config.
 // No network calls at construction — only at .create(), .upsert(), and .delete().
@@ -54,14 +55,19 @@ export class Stream {
    * Publish to this stream. Returns a `Promise<void>` that resolves on
    * broker `RepOk`. Await it to wait for confirmation, or ignore the
    * returned promise for fire-and-forget semantics.
+   *
+   * Pass `opts.msgId` to opt this publish into broker-side dedup on
+   * streams created with `idempotencyWindowMs > 0`. Duplicate ids
+   * within the window are rejected with a `ClientError` carrying the
+   * `IdempotencyDuplicate` code.
    */
-  publish(subject: string, data: Buffer): Promise<void> {
-    return this.client.publish(this.name, subject, data)
+  publish(subject: string, data: Buffer, opts?: PublishOpts): Promise<void> {
+    return this.client.publish(this.name, subject, data, opts)
   }
 
   /** @deprecated alias for {@link publish}. */
-  publishAck(subject: string, data: Buffer): Promise<void> {
-    return this.client.publish(this.name, subject, data)
+  publishAck(subject: string, data: Buffer, opts?: PublishOpts): Promise<void> {
+    return this.client.publish(this.name, subject, data, opts)
   }
 
   /** Batch publish — single V2 BatchPubFrame, ONE round-trip.

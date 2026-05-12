@@ -5,13 +5,24 @@ import { frame } from './frame'
 
 // ── Stream management ──────────────────────────────────────────────────
 
-// CreateStream (0x0401) — 32B: name_len(2)+filter_len(2)+max_msgs(8)+max_bytes(8)+max_age(8)+replicas(1)+journal(1)+retention(1)+discard(1)
+// CreateStream (0x0401) — 40B fixed:
+//   name_len(2) + filter_len(2) + max_msgs(8) + max_bytes(8) + max_age(8)
+// + replicas(1) + journal(1) + retention(1) + discard(1)
+// + idempotency_window_ms(4) + _pad(4)
+// + name + filter
+//
+// `idempotency_window_ms = 0` disables broker-side dedup (default,
+// matches pre-feature behaviour). A non-zero value turns on per-stream
+// dedup: publishes carrying a `msgId` that the broker has already seen
+// for THIS stream within the window are rejected with
+// `ErrorCode::IdempotencyDuplicate (0x0206)`.
 export function packCreateStream(
   seq: bigint, name: Buffer, filter: Buffer,
   maxMsgs: bigint, maxBytes: bigint, maxAgeSecs: bigint,
   replicas = 1, journalKind = 0, retention = 0, discard = 0,
+  idempotencyWindowMs = 0,
 ): Buffer {
-  const buf = frame(Action.CreateStream, seq, 32 + name.length + filter.length)
+  const buf = frame(Action.CreateStream, seq, 40 + name.length + filter.length)
   let off = HEADER_SIZE
   buf.writeUInt16LE(name.length, off);   off += 2
   buf.writeUInt16LE(filter.length, off); off += 2
@@ -22,6 +33,8 @@ export function packCreateStream(
   buf[off++] = journalKind
   buf[off++] = retention
   buf[off++] = discard
+  buf.writeUInt32LE(idempotencyWindowMs >>> 0, off); off += 4
+  buf.writeUInt32LE(0, off);                          off += 4 // _pad
   name.copy(buf, off);   off += name.length
   filter.copy(buf, off)
   return buf

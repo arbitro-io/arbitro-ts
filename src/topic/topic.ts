@@ -25,7 +25,10 @@ export class Topic<T extends Record<string, unknown>> {
   }
 
   publishBatch(values: T[]): void {
-    this.stream.publishBatch(values.map((v) => [this.subject, this.codec.encode(v)]))
+    this.stream.publishBatch(values.map((v) => ({
+      subject: this.subject,
+      payload: this.codec.encode(v),
+    })))
   }
 
   async subscribe(
