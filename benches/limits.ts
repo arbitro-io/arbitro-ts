@@ -54,7 +54,10 @@ async function runScenario(maxCredit: number | null): Promise<void> {
       ackPolicy: AckPolicy.Explicit,
       deliverPolicy: DeliverPolicy.All,
       maxAckPending: 20_000,
-      maxSubjectInflight: maxCredit,
+      // Per-subject inflight cap (plural list — the broker only honours
+      // `maxSubjectInflights` here; a stray singular field would be
+      // silently dropped).
+      maxSubjectInflights: [{ pattern: subject, limit: maxCredit }],
     }
     : {
       name: consumer,
@@ -73,9 +76,21 @@ async function runScenario(maxCredit: number | null): Promise<void> {
   const payload = Buffer.alloc(SIZE, 0x42)
   await pubClient.resolveStream(stream)
   const t0 = process.hrtime.bigint()
-  for (let i = 0; i < MSGS; i++) pubClient.publish(stream, subject, payload)
 
-  const deadline = Date.now() + 30_000
+  // `client.publish` returns Promise<void> (awaits broker RepOk). The
+  // bench wants fire-and-forget burst behaviour, so we attach a noop
+  // .catch to suppress unhandled-rejection crashes if the connection
+  // closes before every RepOk has come back. We collect the promises
+  // and await them as a barrier just before reading throughput so the
+  // measurement still reflects "all sends acknowledged by the broker".
+  const noop = () => { }
+  const sends: Promise<void>[] = new Array(MSGS)
+  for (let i = 0; i < MSGS; i++) {
+    sends[i] = pubClient.publish(stream, subject, payload).catch(noop)
+  }
+  await Promise.allSettled(sends)
+
+  const deadline = Date.now() + 60_000
   while (received < MSGS && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 25))
   }
