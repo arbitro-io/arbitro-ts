@@ -1,85 +1,79 @@
-// Stream + Consumer CRUD frames.
+// Stream + Consumer management frames.
+//
+// Wire format: cold-path management frames now ride as
+// `[Header 16B][serde_json(body)]`. The server's `v2::cold` module
+// decodes the JSON body via `serde_json::from_slice`. This file mirrors
+// the Rust `cold_body!` macro definitions in
+// `crates/arbitro-proto/src/v2/cold/mod.rs`.
+//
+// Important: Rust's `Vec<u8>` is JSON-encoded by serde as an array of
+// numbers (e.g. "orders" → `[111,114,100,101,114,115]`), NOT as a UTF-8
+// string. Every byte-sequence field below uses `Array.from(buffer)` to
+// match. Strings would require the Rust side to opt in to
+// `#[serde(with = "serde_bytes")]`, which it does not.
+//
+// Hot-path frames (Publish, Ack, etc.) keep the zerocopy binary format
+// from their dedicated modules.
 
 import { HEADER_SIZE, Action } from './constants'
 import { frame } from './frame'
 
+/** Build a cold-path frame: `[Header][serde_json(body)]`. */
+function packCold(action: Action, seq: bigint, body: unknown): Buffer {
+  const utf8 = Buffer.from(JSON.stringify(body), 'utf8')
+  const buf  = frame(action, seq, utf8.length)
+  utf8.copy(buf, HEADER_SIZE)
+  return buf
+}
+
+/** Encode a `Buffer` as the JSON array form serde uses for `Vec<u8>`. */
+function bytesArr(b: Buffer): number[] { return Array.from(b) }
+
 // ── Stream management ──────────────────────────────────────────────────
 
-// CreateStream (0x0401) — 40B fixed:
-//   name_len(2) + filter_len(2) + max_msgs(8) + max_bytes(8) + max_age(8)
-// + replicas(1) + journal(1) + retention(1) + discard(1)
-// + idempotency_window_ms(4) + _pad(4)
-// + name + filter
-//
-// `idempotency_window_ms = 0` disables broker-side dedup (default,
-// matches pre-feature behaviour). A non-zero value turns on per-stream
-// dedup: publishes carrying a `msgId` that the broker has already seen
-// for THIS stream within the window are rejected with
-// `ErrorCode::IdempotencyDuplicate (0x0206)`.
+/**
+ * Cold body for `CreateStream`. `idempotencyWindowMs = 0` disables
+ * broker-side dedup (default); a non-zero value enables per-stream
+ * `msgId` dedup over that window.
+ */
 export function packCreateStream(
   seq: bigint, name: Buffer, filter: Buffer,
   maxMsgs: bigint, maxBytes: bigint, maxAgeSecs: bigint,
   replicas = 1, journalKind = 0, retention = 0, discard = 0,
   idempotencyWindowMs = 0,
 ): Buffer {
-  const buf = frame(Action.CreateStream, seq, 40 + name.length + filter.length)
-  let off = HEADER_SIZE
-  buf.writeUInt16LE(name.length, off);   off += 2
-  buf.writeUInt16LE(filter.length, off); off += 2
-  buf.writeBigUInt64LE(maxMsgs, off);    off += 8
-  buf.writeBigUInt64LE(maxBytes, off);   off += 8
-  buf.writeBigUInt64LE(maxAgeSecs, off); off += 8
-  buf[off++] = replicas
-  buf[off++] = journalKind
-  buf[off++] = retention
-  buf[off++] = discard
-  buf.writeUInt32LE(idempotencyWindowMs >>> 0, off); off += 4
-  buf.writeUInt32LE(0, off);                          off += 4 // _pad
-  name.copy(buf, off);   off += name.length
-  filter.copy(buf, off)
-  return buf
+  return packCold(Action.CreateStream, seq, {
+    name:                  bytesArr(name),
+    filter:                bytesArr(filter),
+    max_msgs:              Number(maxMsgs),       // u64 — fits in JS number if < 2^53
+    max_bytes:             Number(maxBytes),
+    max_age_secs:          Number(maxAgeSecs),
+    replicas, journal_kind: journalKind, retention, discard,
+    idempotency_window_ms: idempotencyWindowMs >>> 0,
+  })
 }
 
-// DeleteStream/GetStream/PurgeStream — 8B: name_len(2) + _pad(6)
-function packNamedStream(action: Action, seq: bigint, name: Buffer): Buffer {
-  const buf = frame(action, seq, 8 + name.length)
-  buf.writeUInt16LE(name.length, HEADER_SIZE)
-  buf.fill(0, HEADER_SIZE + 2, HEADER_SIZE + 8)
-  name.copy(buf, HEADER_SIZE + 8)
-  return buf
-}
+export const packDeleteStream = (seq: bigint, name: Buffer): Buffer =>
+  packCold(Action.DeleteStream, seq, { name: bytesArr(name) })
 
-export const packDeleteStream = (s: bigint, n: Buffer) => packNamedStream(Action.DeleteStream, s, n)
-export const packGetStream    = (s: bigint, n: Buffer) => packNamedStream(Action.GetStream, s, n)
-export const packPurgeStream  = (s: bigint, n: Buffer) => packNamedStream(Action.PurgeStream, s, n)
+export const packGetStream = (seq: bigint, name: Buffer): Buffer =>
+  packCold(Action.GetStream, seq, { name: bytesArr(name) })
 
-// DrainSubject (0x0406) — 8B: name_len(2) + subj_len(2) + _pad(4)
-export function packDrainSubject(seq: bigint, name: Buffer, subject: Buffer): Buffer {
-  const buf = frame(Action.DrainSubject, seq, 8 + name.length + subject.length)
-  buf.writeUInt16LE(name.length, HEADER_SIZE)
-  buf.writeUInt16LE(subject.length, HEADER_SIZE + 2)
-  buf.writeUInt32LE(0, HEADER_SIZE + 4)
-  let off = HEADER_SIZE + 8
-  name.copy(buf, off);    off += name.length
-  subject.copy(buf, off)
-  return buf
-}
+export const packPurgeStream = (seq: bigint, name: Buffer): Buffer =>
+  packCold(Action.PurgeStream, seq, { name: bytesArr(name) })
 
-// ListStreams (0x0404) — 8B: offset(4) + limit(4)
-export function packListStreams(seq: bigint, offset = 0, limit = 1000): Buffer {
-  const buf = frame(Action.ListStreams, seq, 8)
-  buf.writeUInt32LE(offset, HEADER_SIZE)
-  buf.writeUInt32LE(limit, HEADER_SIZE + 4)
-  return buf
-}
+export const packDrainSubject = (seq: bigint, name: Buffer, subject: Buffer): Buffer =>
+  packCold(Action.DrainSubject, seq, {
+    name:    bytesArr(name),
+    subject: bytesArr(subject),
+  })
+
+export const packListStreams = (seq: bigint, offset = 0, limit = 1000): Buffer =>
+  packCold(Action.ListStreams, seq, { offset: offset >>> 0, limit: limit >>> 0 })
 
 // ── Consumer management ────────────────────────────────────────────────
 
-/**
- * One per-subject inflight cap. `pattern` accepts NATS wildcards
- * (`*` = one token, `>` = remaining tokens). Effective only when the
- * consumer's `ackPolicy` is Explicit; server drops them otherwise.
- */
+/** One per-subject inflight cap. Enforced only with `ackPolicy === Explicit`. */
 export interface WireSubjectLimit {
   pattern: Buffer
   limit:   number
@@ -92,90 +86,49 @@ export interface CreateConsumerOpts {
   subjectLimits?: WireSubjectLimit[]
 }
 
-// CreateConsumer (0x0501) — 28B fixed + name + group + filter [+ subject_limits trailer]
-//
-// Optional trailer (only present when subjectLimits non-empty):
-//   count u16 || N × (limit u32 + pattern_len u16 + pattern bytes)
-//
-// Layout mirrors arbitro_proto::wire::manager::CreateConsumerView so the
-// command log can replay raw wire body bytes without translation.
 export function packCreateConsumer(seq: bigint, opts: CreateConsumerOpts): Buffer {
-  const { name, group, filter, streamId } = opts
-  const limits = opts.subjectLimits ?? []
-
-  // Pre-compute trailer length.
-  let trailerLen = 0
-  if (limits.length > 0) {
-    trailerLen = 2 // count u16
-    for (const l of limits) trailerLen += 6 + l.pattern.length // limit u32 + plen u16 + pattern
-  }
-
-  const buf = frame(
-    Action.CreateConsumer, seq,
-    28 + name.length + group.length + filter.length + trailerLen,
-  )
-  let off = HEADER_SIZE
-  buf.writeUInt16LE(name.length, off);   off += 2
-  buf.writeUInt16LE(filter.length, off); off += 2
-  buf.writeUInt32LE(streamId, off);      off += 4
-  buf.writeUInt16LE(Math.min(opts.maxInflight ?? 0, 0xFFFF), off); off += 2
-  buf[off++] = opts.ackPolicy ?? 1
-  buf[off++] = opts.deliverPolicy ?? 0
-  buf[off++] = opts.deliverMode ?? 0
-  buf[off++] = 0
-  buf.writeUInt16LE(group.length, off);  off += 2
-  buf.writeUInt32LE(opts.ackWaitMs ?? 0, off); off += 4
-  buf.writeBigUInt64LE(opts.startSeq ?? 0n, off); off += 8
-  name.copy(buf, off);   off += name.length
-  group.copy(buf, off);  off += group.length
-  filter.copy(buf, off); off += filter.length
-
-  // Subject-limits trailer (optional).
-  if (limits.length > 0) {
-    buf.writeUInt16LE(limits.length, off); off += 2
-    for (const l of limits) {
-      buf.writeUInt32LE(l.limit, off);              off += 4
-      buf.writeUInt16LE(l.pattern.length, off);     off += 2
-      l.pattern.copy(buf, off);                     off += l.pattern.length
-    }
-  }
-  return buf
+  const limits = (opts.subjectLimits ?? []).map(l => ({
+    pattern: bytesArr(l.pattern),
+    limit:   l.limit >>> 0,
+  }))
+  return packCold(Action.CreateConsumer, seq, {
+    stream_id:      opts.streamId >>> 0,
+    name:           bytesArr(opts.name),
+    group:          bytesArr(opts.group),
+    subject:        bytesArr(opts.filter),
+    max_inflight:   Math.min(opts.maxInflight ?? 0, 0xFFFF),
+    ack_policy:     opts.ackPolicy     ?? 1,
+    deliver_policy: opts.deliverPolicy ?? 0,
+    deliver_mode:   opts.deliverMode   ?? 0,
+    ack_wait_ms:    (opts.ackWaitMs ?? 0) >>> 0,
+    start_seq:      Number(opts.startSeq ?? 0n),
+    subject_limits: limits,
+  })
 }
 
-// DeleteConsumer (0x0502) — 8B: consumer_id(4) + _pad(4)
-export function packDeleteConsumer(seq: bigint, consumerId: number): Buffer {
-  const buf = frame(Action.DeleteConsumer, seq, 8)
-  buf.writeUInt32LE(consumerId, HEADER_SIZE)
-  buf.writeUInt32LE(0, HEADER_SIZE + 4)
-  return buf
-}
+export const packDeleteConsumer = (seq: bigint, consumerId: number): Buffer =>
+  packCold(Action.DeleteConsumer, seq, { consumer_id: consumerId >>> 0 })
 
-// ConsumerStats (0x0505) — 8B: consumer_id(4) + _pad(4)
-// Reply is a standard RepOk whose 8-byte body carries the pending-ack
-// count as a u64 (little-endian) in place of the usual ref_seq.
-export function packConsumerStats(seq: bigint, consumerId: number): Buffer {
-  const buf = frame(Action.ConsumerStats, seq, 8)
-  buf.writeUInt32LE(consumerId, HEADER_SIZE)
-  buf.writeUInt32LE(0, HEADER_SIZE + 4)
-  return buf
-}
+export const packGetConsumer = (seq: bigint, streamId: number, name: Buffer): Buffer =>
+  packCold(Action.GetConsumer, seq, {
+    stream_id: streamId >>> 0,
+    name:      bytesArr(name),
+  })
 
-// GetConsumer (0x0503) — 8B: stream_id(4) + name_len(2) + _pad(2)
-export function packGetConsumer(seq: bigint, streamId: number, name: Buffer): Buffer {
-  const buf = frame(Action.GetConsumer, seq, 8 + name.length)
-  buf.writeUInt32LE(streamId, HEADER_SIZE)
-  buf.writeUInt16LE(name.length, HEADER_SIZE + 4)
-  buf.writeUInt16LE(0, HEADER_SIZE + 6)
-  name.copy(buf, HEADER_SIZE + 8)
-  return buf
-}
+export const packListConsumers = (seq: bigint, streamId = 0, offset = 0, limit = 1000): Buffer =>
+  packCold(Action.ListConsumers, seq, {
+    stream_id: streamId >>> 0,
+    offset:    offset >>> 0,
+    limit:     limit >>> 0,
+  })
 
-// ListConsumers (0x0504) — 16B: stream_id(4) + offset(4) + limit(4) + _pad(4)
-export function packListConsumers(seq: bigint, streamId = 0, offset = 0, limit = 1000): Buffer {
-  const buf = frame(Action.ListConsumers, seq, 16)
-  buf.writeUInt32LE(streamId, HEADER_SIZE)
-  buf.writeUInt32LE(offset, HEADER_SIZE + 4)
-  buf.writeUInt32LE(limit, HEADER_SIZE + 8)
-  buf.writeUInt32LE(0, HEADER_SIZE + 12)
-  return buf
-}
+export const packConsumerStats = (seq: bigint, consumerId: number): Buffer =>
+  packCold(Action.ConsumerStats, seq, { consumer_id: consumerId >>> 0 })
+
+/** M11: pause delivery to a consumer. */
+export const packPauseConsumer = (seq: bigint, consumerId: number): Buffer =>
+  packCold(Action.PauseConsumer, seq, { consumer_id: consumerId >>> 0 })
+
+/** M11: resume delivery to a previously paused consumer. */
+export const packResumeConsumer = (seq: bigint, consumerId: number): Buffer =>
+  packCold(Action.ResumeConsumer, seq, { consumer_id: consumerId >>> 0 })

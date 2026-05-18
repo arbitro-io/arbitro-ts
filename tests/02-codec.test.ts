@@ -59,8 +59,8 @@ describe('V2 Publish frame', () => {
 describe('V2 PublishBatch frame', () => {
   it('encodes multiple entries', () => {
     const entries = [
-      { subject: Buffer.from('a.b'), payload: Buffer.from('P1') },
-      { subject: Buffer.from('c.d.e'), payload: Buffer.from('P2P2') },
+      { subject: 'a.b',   payload: Buffer.from('P1') },
+      { subject: 'c.d.e', payload: Buffer.from('P2P2') },
     ]
     const frame = packPublishBatch(7n, 0xBEEF, entries)
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.PublishBatch)
@@ -69,15 +69,29 @@ describe('V2 PublishBatch frame', () => {
   })
 })
 
-describe('V2 Subscribe frame', () => {
-  it('encodes consumer_id and filter', () => {
+function bodyJson(frame: Buffer): any {
+  return JSON.parse(frame.subarray(HEADER_SIZE).toString('utf8'))
+}
+
+describe('V2 Subscribe frame (cold/JSON)', () => {
+  it('encodes consumer_id + subscription_id + filters', () => {
     const filter = Buffer.from('orders.*.eu')
     const frame = packSubscribe(5n, 100, 42, filter)
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Subscribe)
-    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(100)       // conn_id
-    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(42)    // consumer_id
-    expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(filter.length)
-    expect(frame.subarray(HEADER_SIZE + 12, HEADER_SIZE + 12 + filter.length).toString()).toBe('orders.*.eu')
+    expect(bodyJson(frame)).toEqual({
+      consumer_id:     42,
+      subscription_id: 0,
+      filters:         [Array.from(filter)],
+    })
+  })
+
+  it('empty filter becomes empty filters array (catch-all)', () => {
+    const frame = packSubscribe(5n, 100, 42, Buffer.alloc(0))
+    expect(bodyJson(frame)).toEqual({
+      consumer_id:     42,
+      subscription_id: 0,
+      filters:         [],
+    })
   })
 })
 
@@ -122,30 +136,31 @@ describe('V2 Ack/Nack frames', () => {
   })
 })
 
-describe('V2 Stream management frames', () => {
+describe('V2 Stream management frames (cold/JSON)', () => {
   it('CreateStream encodes name + filter + retention', () => {
     const frame = packCreateStream(1n, Buffer.from('events'), Buffer.from('events.>'), 1000n, 0n, 3600n)
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateStream)
-    expect(frame.readUInt16LE(HEADER_SIZE)).toBe(6)       // name_len
-    expect(frame.readUInt16LE(HEADER_SIZE + 2)).toBe(8)   // filter_len
-    expect(frame.readBigUInt64LE(HEADER_SIZE + 4)).toBe(1000n)  // max_msgs
+    const body = bodyJson(frame)
+    expect(body.name).toEqual(Array.from(Buffer.from('events')))
+    expect(body.filter).toEqual(Array.from(Buffer.from('events.>')))
+    expect(body.max_msgs).toBe(1000)
+    expect(body.max_age_secs).toBe(3600)
   })
 
   it('DeleteStream encodes name', () => {
     const frame = packDeleteStream(2n, Buffer.from('old'))
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.DeleteStream)
-    expect(frame.subarray(HEADER_SIZE + 8, HEADER_SIZE + 8 + 3).toString()).toBe('old')
+    expect(bodyJson(frame)).toEqual({ name: Array.from(Buffer.from('old')) })
   })
 
   it('ListStreams encodes offset and limit', () => {
     const frame = packListStreams(3n, 10, 50)
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.ListStreams)
-    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(10)
-    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(50)
+    expect(bodyJson(frame)).toEqual({ offset: 10, limit: 50 })
   })
 })
 
-describe('V2 Consumer management frames', () => {
+describe('V2 Consumer management frames (cold/JSON)', () => {
   it('CreateConsumer encodes all fields', () => {
     const frame = packCreateConsumer(1n, {
       streamId: 7,
@@ -159,24 +174,27 @@ describe('V2 Consumer management frames', () => {
       startSeq: 0n,
     })
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.CreateConsumer)
-    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(7)  // stream_id
-    expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(128)  // max_inflight
-    // Tail starts at offset 28 (bodyFixed)
-    const tail = frame.subarray(HEADER_SIZE + 28)
-    expect(tail.subarray(0, 6).toString()).toBe('worker')
+    const body = bodyJson(frame)
+    expect(body.stream_id).toBe(7)
+    expect(body.name).toEqual(Array.from(Buffer.from('worker')))
+    expect(body.group).toEqual(Array.from(Buffer.from('grp')))
+    expect(body.subject).toEqual(Array.from(Buffer.from('orders.>')))
+    expect(body.max_inflight).toBe(128)
   })
 
   it('DeleteConsumer encodes consumer_id', () => {
     const frame = packDeleteConsumer(2n, 42)
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.DeleteConsumer)
-    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(42)
+    expect(bodyJson(frame)).toEqual({ consumer_id: 42 })
   })
 
   it('GetConsumer encodes stream_id + name', () => {
     const frame = packGetConsumer(3n, 7, Buffer.from('worker'))
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.GetConsumer)
-    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(7)
-    expect(frame.readUInt16LE(HEADER_SIZE + 4)).toBe(6)  // name_len
+    expect(bodyJson(frame)).toEqual({
+      stream_id: 7,
+      name:      Array.from(Buffer.from('worker')),
+    })
   })
 })
 

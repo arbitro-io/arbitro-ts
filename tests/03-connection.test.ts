@@ -43,23 +43,24 @@ describe('V2 Ack/Nack frame encoding', () => {
   })
 })
 
-describe('V2 Subscribe/Unsubscribe frame encoding', () => {
-  it('Subscribe frame carries conn_id, consumer_id, filter', () => {
+describe('V2 Subscribe/Unsubscribe frame encoding (cold/JSON)', () => {
+  it('Subscribe frame carries consumer_id + filters[] (no conn_id post-migration)', () => {
     const filter = Buffer.from('orders.>')
     const frame = packSubscribe(10n, 100, 55, filter)
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Subscribe)
-    expect(frame.readUInt32LE(HEADER_SIZE)).toBe(100)       // conn_id
-    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(55)    // consumer_id
-    expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(filter.length)
-    expect(frame.subarray(HEADER_SIZE + 12).toString()).toBe('orders.>')
+    const body = JSON.parse(frame.subarray(HEADER_SIZE).toString('utf8'))
+    expect(body).toEqual({
+      consumer_id:     55,
+      subscription_id: 0,
+      filters:         [Array.from(filter)],
+    })
   })
 
-  it('Unsubscribe frame has zero filter', () => {
+  it('Unsubscribe frame carries just consumer_id', () => {
     const frame = packUnsubscribe(99n, 100, 55)
     expect(frame.readUInt16LE(OFF_ACTION)).toBe(Action.Unsubscribe)
-    expect(frame.readUInt32LE(HEADER_SIZE + 4)).toBe(55)    // consumer_id
-    expect(frame.readUInt16LE(HEADER_SIZE + 8)).toBe(0)     // filter_len = 0
-    expect(frame.length).toBe(HEADER_SIZE + 12)
+    const body = JSON.parse(frame.subarray(HEADER_SIZE).toString('utf8'))
+    expect(body).toEqual({ consumer_id: 55 })
   })
 })
 

@@ -1,32 +1,40 @@
-// Delivery lifecycle — Subscribe, Unsubscribe, Ack, Nack, BatchAck, BatchNack.
+// Delivery lifecycle — Subscribe/Unsubscribe (cold path, JSON) +
+// Ack/Nack/BatchAck/BatchNack (hot path, binary).
 
 import { HEADER_SIZE, Action } from './constants'
 import { frame } from './frame'
 
-// ── Subscribe / Unsubscribe ─────────────────────────────────────────────
+// ── Subscribe / Unsubscribe (cold path, JSON body) ──────────────────────
+//
+// Mirror of `arbitro_proto::v2::cold::Subscribe`:
+//   { consumer_id: u32, subscription_id: u32, filters: Vec<Vec<u8>> }
+//
+// `subscription_id = 0` selects legacy "subscription_id == consumer_id"
+// dispatch on the server. Empty `filters` (or single empty entry) =
+// catch-all.
 
-// Body: conn_id(4) + consumer_id(4) + filter_len(2) + options_flags(2) = 12B + filter
-export function packSubscribe(
-  seq: bigint, connId: number, consumerId: number,
-  filter: Buffer, optionsFlags = 0,
-): Buffer {
-  const buf = frame(Action.Subscribe, seq, 12 + filter.length)
-  buf.writeUInt32LE(connId, HEADER_SIZE)
-  buf.writeUInt32LE(consumerId, HEADER_SIZE + 4)
-  buf.writeUInt16LE(filter.length, HEADER_SIZE + 8)
-  buf.writeUInt16LE(optionsFlags, HEADER_SIZE + 10)
-  filter.copy(buf, HEADER_SIZE + 12)
+function packCold(action: Action, seq: bigint, body: unknown): Buffer {
+  const utf8 = Buffer.from(JSON.stringify(body), 'utf8')
+  const buf  = frame(action, seq, utf8.length)
+  utf8.copy(buf, HEADER_SIZE)
   return buf
 }
 
-// Same body shape, filter_len = 0
-export function packUnsubscribe(seq: bigint, connId: number, consumerId: number): Buffer {
-  const buf = frame(Action.Unsubscribe, seq, 12)
-  buf.writeUInt32LE(connId, HEADER_SIZE)
-  buf.writeUInt32LE(consumerId, HEADER_SIZE + 4)
-  buf.writeUInt16LE(0, HEADER_SIZE + 8)
-  buf.writeUInt16LE(0, HEADER_SIZE + 10)
-  return buf
+export function packSubscribe(
+  seq: bigint, _connId: number, consumerId: number,
+  filter: Buffer, _optionsFlags = 0,
+): Buffer {
+  const filters: number[][] =
+    filter.length === 0 ? [] : [Array.from(filter)]
+  return packCold(Action.Subscribe, seq, {
+    consumer_id:     consumerId >>> 0,
+    subscription_id: 0,
+    filters,
+  })
+}
+
+export function packUnsubscribe(seq: bigint, _connId: number, consumerId: number): Buffer {
+  return packCold(Action.Unsubscribe, seq, { consumer_id: consumerId >>> 0 })
 }
 
 // ── Ack / Nack ──────────────────────────────────────────────────────────

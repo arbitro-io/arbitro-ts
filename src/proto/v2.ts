@@ -11,5 +11,5 @@ export {
   packPurgeStream, packDrainSubject, packListStreams,
   type CreateConsumerOpts, type WireSubjectLimit, packCreateConsumer,
   packDeleteConsumer, packGetConsumer, packListConsumers,
-  packConsumerStats,
+  packConsumerStats, packPauseConsumer, packResumeConsumer,
 } from './manage'
