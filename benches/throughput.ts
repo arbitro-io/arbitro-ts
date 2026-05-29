@@ -335,6 +335,7 @@ async function runPubSub(label: string, batchPublish: boolean): Promise<void> {
 
         const pubT0 = nowNs();
         await publishLoop(s, subject, payload, MSGS, batchPublish);
+        console.log('pub completed');
         const pubElapsedMs = elapsedMs(pubT0);
 
         const completed = await waitWithTimeout(done.promise, RECEIVE_TIMEOUT_MS);

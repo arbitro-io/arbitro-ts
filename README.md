@@ -41,14 +41,14 @@ npm install @arbitro/client
 The broker ships as a public Docker image (musl-static, ~3 MB, scratch base):
 
 ```bash
-docker run --rm -p 9898:9898 ghcr.io/arbitro-io/arbitro-server:0.1.0
+docker run --rm -p 9898:9898 ghcr.io/arbitro-io/arbitro-server:latest
 ```
 
 Pin a major/minor tag for production:
 
-- `ghcr.io/arbitro-io/arbitro-server:0.1.0` — immutable, recommended for prod
+- `ghcr.io/arbitro-io/arbitro-server:0.1.0` — immutable release tag
 - `ghcr.io/arbitro-io/arbitro-server:0.1`   — auto-updates within `0.1.*`
-- `ghcr.io/arbitro-io/arbitro-server:latest` — last tagged release
+- `ghcr.io/arbitro-io/arbitro-server:latest` — latest tagged release
 
 ## Quick start
 
@@ -240,8 +240,9 @@ Three primary bench families:
 Examples:
 
 ```bash
-npx tsx benches/throughput.ts --mode fire-and-forget --msgs 20000
-npx tsx benches/throughput.ts --mode perf --seconds 10 --rate 20000 --container arbitro-server
+npx tsx benches/throughput.ts --mode all --msgs 1000
+npx tsx benches/throughput.ts --mode pubsub-single --msgs 1000
+npx tsx benches/throughput.ts --mode reply-batch --msgs 1000 --batch 128
 npx tsx benches/limits.ts
 npx tsx benches/chaos.ts --duration 8 --rate 50 --container arbitro-server
 ```

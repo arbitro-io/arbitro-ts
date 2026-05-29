@@ -136,7 +136,7 @@ async function main(): Promise<void> {
       const payload = Buffer.alloc(Math.max(SIZE, 4), 0x42)
       payload.writeUInt32LE(seq, 0)
       try {
-        await pub.publishAck(stream, subject, payload)
+        await pub.publish(stream, subject, payload)
         sentSeqs.add(seq)
         seq++
       } catch {

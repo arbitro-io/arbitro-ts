@@ -130,13 +130,13 @@ export class ArbitroClient {
     const sid = this.cachedSid(streamName)
     const prefixedMsgs: BatchPublishEntry[] = this.cfg.prefix
       ? messages.map((m): BatchPublishEntry => {
-          const entry: BatchPublishEntry = {
-            subject: this.prefixed(m.subject),
-            payload: m.payload,
-          }
-          if (m.msgId !== undefined) entry.msgId = m.msgId
-          return entry
-        })
+        const entry: BatchPublishEntry = {
+          subject: this.prefixed(m.subject),
+          payload: m.payload,
+        }
+        if (m.msgId !== undefined) entry.msgId = m.msgId
+        return entry
+      })
       : messages
     this._metrics.publishBatchEntries += messages.length
     return streamPublishBatch(this.conn, sid, prefixedMsgs)
@@ -290,7 +290,7 @@ export class ArbitroClient {
       maxInflight: config.maxAckPending ?? 0,
       ackPolicy: ackPolicyByte,
       deliverPolicy: deliverPolicyToU8(config.deliverPolicy),
-      deliverMode: config.fanout ? 1 : 0,
+      deliverMode: config.fanout ? 0 : 1,
       ackWaitMs: config.ackWaitMs ?? 0,
       startSeq: BigInt(config.startSeq ?? 0),
     }
