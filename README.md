@@ -219,9 +219,28 @@ const sub = await client
 
 `zod` is an optional peer dependency. `@arbitro/client` references zod only via `import type`, so users who never call `zodCodec` pay zero runtime cost and don't need zod installed.
 
+## Cron Scheduling
+
+Register distributed cron jobs with queue semantics — multiple workers, single delivery per fire.
+
+```typescript
+const cron = await client.cron("billing-monthly")
+    .every("0 0 1 * *")
+    .tz("America/New_York")
+    .run(async (ctx) => {
+        console.log(`fire #${ctx.fireCount} at ${ctx.fireTime}`);
+        await processBilling();
+    });
+
+// Stop when done
+await cron.stop();
+```
+
+Crons re-register automatically on reconnect. No persistence — if the broker restarts, clients re-register their crons when they reconnect.
+
 ## Reconnect behavior
 
-The TS client reconnects transport automatically and reattaches active subscriptions after reconnect. That behavior lives in the client, not in the benchmarks. This matters for:
+The TS client reconnects transport automatically and reattaches active subscriptions and cron jobs after reconnect. That behavior lives in the client, not in the benchmarks. This matters for:
 
 - Docker restarts
 - broker failover tests
