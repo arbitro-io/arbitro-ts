@@ -10,6 +10,8 @@ import type { TlsConfig, ReconnectConfig } from '../types/config'
 import { resolveLogger } from '../common/logger'
 import type { Logger } from '../common/logger'
 import type { ClientMetrics } from '../client/metrics'
+import { CronState } from '../cron/cron-state'
+import { decodeCronFire, packCronAck, packCreateCron } from '../cron/cron-frame'
 
 type DeliveryHandler = (frame: Buffer) => void
 
@@ -43,6 +45,7 @@ export class Connection {
   private readonly log: Logger
   private activeSubs = new Map<number, ActiveSubscription>()
   private metrics?: ClientMetrics
+  private cronState?: CronState
 
   private constructor(
     socket: net.Socket,
@@ -112,6 +115,9 @@ export class Connection {
    */
   setMetrics(m: ClientMetrics): void { this.metrics = m }
 
+  /** Attach cron state so the connection can dispatch CronFire frames. */
+  setCronState(s: CronState): void { this.cronState = s }
+
   // ── Frame routing ─────────────────────────────────────────────────────────
   // Seq-based dispatch: match reply.header.seq → pending request. O(1).
 
@@ -166,6 +172,10 @@ export class Connection {
         this.handleBatchDeliver(frame)
         return
       }
+      case Action.CronFire: {
+        this.dispatchCronFire(frame)
+        return
+      }
       case Action.Pong: return
       default: {
         // Silently drop unknown actions (matches Rust client behavior)
@@ -215,6 +225,27 @@ export class Connection {
     }
   }
 
+  // ── Cron dispatch ──────────────────────────────────────────────────────────
+
+  private dispatchCronFire(frame: Buffer): void {
+    const body = frame.subarray(HEADER_SIZE)
+    const view = decodeCronFire(body)
+    if (!view) return
+
+    const handler = this.cronState?.getHandler(view.name)
+    const nameBuf = Buffer.from(view.name)
+
+    if (!handler) {
+      this.send(packCronAck(this.nextSeq(), nameBuf, false))
+      return
+    }
+
+    // Execute async handler outside sync dispatch; send ack when done.
+    handler({ name: view.name, fireTime: view.fireTimeMs, fireCount: view.fireCount })
+      .then(() => this.send(packCronAck(this.nextSeq(), nameBuf, true)))
+      .catch(() => this.send(packCronAck(this.nextSeq(), nameBuf, false)))
+  }
+
   // ── Subscriptions ─────────────────────────────────────────────────────────
 
   async sendSubscribeV2(
@@ -257,6 +288,15 @@ export class Connection {
       this.sendSubscribeV2(consumerId, filter, handler, onRenew)
         .then((id) => { if (onRenew) onRenew(id) })
         .catch(() => { })
+    }
+    this.replayCrons()
+  }
+
+  private replayCrons(): void {
+    if (!this.cronState) return
+    for (const { config } of this.cronState.allConfigs()) {
+      const seq = this.nextSeq()
+      this.socket.write(packCreateCron(seq, config))
     }
   }
 

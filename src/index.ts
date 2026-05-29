@@ -14,6 +14,8 @@ export { Consumer } from "./consumer";
 export { Message } from "./message";
 export { Stream } from "./stream";
 export { Topic } from "./topic";
+export { CronBuilder, CronHandle } from "./cron";
+export type { CronContext, CronHandler } from "./cron";
 
 export type { Logger, LogFn } from "./common/logger";
 

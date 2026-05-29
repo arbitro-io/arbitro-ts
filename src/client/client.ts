@@ -20,6 +20,8 @@ import type {
 import { AckPolicy, DeliverPolicy, JournalType } from '../types/config'
 import { Message } from '../message/message'
 import { BatchPublishEntry } from '../proto/publish'
+import { CronBuilder } from '../cron/cron-builder'
+import { CronState } from '../cron/cron-state'
 
 type MsgCallback = (msg: Message) => void
 
@@ -37,6 +39,7 @@ export class ArbitroClient {
   private readonly logger: ClientConfig['logger']
   private readonly sidCache = new Map<string, number>()
   private readonly _metrics = new ClientMetrics()
+  private readonly _cronState = new CronState()
 
   constructor(config: ClientConfig) {
     this.cfg = { ...DEFAULT_CONFIG, ...config }
@@ -51,6 +54,7 @@ export class ArbitroClient {
       addr, this.cfg.timeout, this.tls, this.cfg.reconnect, this.logger,
     )
     this.conn.setMetrics(this._metrics)
+    this.conn.setCronState(this._cronState)
     return this
   }
 
@@ -435,6 +439,13 @@ export class ArbitroClient {
 
   stream(name: string, config?: StreamConfig): Stream {
     return new Stream(this, name, config)
+  }
+
+  // ── Cron ──────────────────────────────────────────────────────────────────
+
+  /** Start building a cron job. Call `.every()` then `.run()` to register. */
+  cron(name: string): CronBuilder {
+    return new CronBuilder(this.conn, this._cronState, name)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────

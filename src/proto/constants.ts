@@ -97,4 +97,11 @@ export const enum Action {
   Connect    = 0x0603,
   Connected  = 0x0604,
   Disconnect = 0x0605,
+
+  // 0x07xx — Cron scheduling
+  CreateCron = 0x0701,
+  DeleteCron = 0x0702,
+  ListCrons  = 0x0703,
+  CronFire   = 0x0704,
+  CronAck    = 0x0705,
 }
