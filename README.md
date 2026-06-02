@@ -246,26 +246,6 @@ The TS client reconnects transport automatically and reattaches active subscript
 - broker failover tests
 - chaos scenarios with durable consumers
 
-## Benchmarks
-
-Three primary bench families:
-
-| File | npm script | What it measures |
-|---|---|---|
-| `benches/throughput.ts` | `npm run bench` | Publish + delivery throughput across modes (fire-and-forget, batch, sync, replay-ack, replay-noack). |
-| `benches/limits.ts` | `npm run bench:limit` | Behaviour under `maxSubjectInflights` saturation. |
-| `benches/chaos.ts` | `npm run bench:chaos` | Restart / reconnect / persistence under failure injection. |
-
-Examples:
-
-```bash
-npx tsx benches/throughput.ts --mode all --msgs 1000
-npx tsx benches/throughput.ts --mode pubsub-single --msgs 1000
-npx tsx benches/throughput.ts --mode reply-batch --msgs 1000 --batch 128
-npx tsx benches/limits.ts
-npx tsx benches/chaos.ts --duration 8 --rate 50 --container arbitro-server
-```
-
 ## Validation
 
 ```bash
