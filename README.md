@@ -238,6 +238,16 @@ await cron.stop();
 
 Crons re-register automatically on reconnect. No persistence — if the broker restarts, clients re-register their crons when they reconnect.
 
+## Delayed Publish
+
+Schedule message delivery for the future:
+
+```typescript
+await client.publishDelayed("ORDERS", "orders.reminder", payload, 5000); // 5s delay
+```
+
+Messages are persisted immediately — survives broker restart.
+
 ## Reconnect behavior
 
 The TS client reconnects transport automatically and reattaches active subscriptions and cron jobs after reconnect. That behavior lives in the client, not in the benchmarks. This matters for:
