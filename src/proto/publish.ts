@@ -61,6 +61,28 @@ export function packPublishWithReply(
   return buf
 }
 
+// Body: stream_id(4) + subject_len(2) + msg_id_len(2) + delay_ms(8) = 16B + subject + msg_id + payload
+export function packPublishDelayed(
+  seq: bigint, streamId: number,
+  subject: Buffer, payload: Buffer,
+  delayMs: bigint,
+  flags = 0, entryFlags = 0,
+): Buffer {
+  const buf = frame(
+    Action.PublishDelayed, seq,
+    16 + subject.length + payload.length,
+    flags, entryFlags,
+  )
+  buf.writeUInt32LE(streamId, HEADER_SIZE)
+  buf.writeUInt16LE(subject.length, HEADER_SIZE + 4)
+  buf.writeUInt16LE(0, HEADER_SIZE + 6) // msg_id_len = 0
+  buf.writeBigUInt64LE(delayMs, HEADER_SIZE + 8)
+  let off = HEADER_SIZE + 16
+  subject.copy(buf, off); off += subject.length
+  payload.copy(buf, off)
+  return buf
+}
+
 // Body: stream_id(4) + count(4) = 8B
 // + entries[subject_len(2)+msg_id_len(2)+payload_len(4) + subject + msg_id + payload]
 export function packPublishBatch(

@@ -91,6 +91,9 @@ export const enum Action {
   PauseConsumer  = 0x0506,
   ResumeConsumer = 0x0507,
 
+  // 0x08xx — Delayed publish
+  PublishDelayed = 0x0801,
+
   // 0x06xx — System
   Ping       = 0x0601,
   Pong       = 0x0602,

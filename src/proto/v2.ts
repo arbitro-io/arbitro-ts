@@ -1,7 +1,7 @@
 // Barrel — all V2 frame builders re-exported from submodules.
 
 export { frame, packHello, packPing, packDisconnect } from './frame'
-export { packPublish, packPublishWithReply, packPublishBatch } from './publish'
+export { packPublish, packPublishWithReply, packPublishBatch, packPublishDelayed } from './publish'
 export {
   packSubscribe, packUnsubscribe,
   packAck, packNack, packBatchAck, packBatchNack,

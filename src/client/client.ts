@@ -152,6 +152,25 @@ export class ArbitroClient {
     return streamRequest(this.conn, sid, subject, data, timeoutMs)
   }
 
+  /**
+   * Publish a message with a delivery delay. The broker parks the message
+   * in its delayed journal and delivers it to consumers after `delayMs`
+   * milliseconds. Returns a Promise that resolves once the broker confirms
+   * receipt.
+   */
+  async publishDelayed(
+    streamName: string, subject: string, data: Buffer, delayMs: number,
+  ): Promise<void> {
+    const sid = await this.resolveStreamId(streamName)
+    const { packPublishDelayed } = await import('../proto/publish')
+    const { Flag } = await import('../proto/constants')
+    const subj = Buffer.from(this.prefixed(subject))
+    await this.conn.sendExpectReply(
+      packPublishDelayed(this.conn.nextSeq(), sid, subj, data, BigInt(delayMs), Flag.AckReq),
+    )
+    this._metrics.publishesSent++
+  }
+
   // ── Subscribe ─────────────────────────────────────────────────────────────
 
   /** Subscribe with explicit consumer config. */
