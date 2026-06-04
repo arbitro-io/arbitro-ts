@@ -107,4 +107,14 @@ export const enum Action {
   ListCrons  = 0x0703,
   CronFire   = 0x0704,
   CronAck    = 0x0705,
+
+  // 0x09xx — Workflow
+  CreateWorkflow = 0x0901,
+  DeleteWorkflow = 0x0902,
+  ListWorkflows  = 0x0903,
+  WorkflowStep   = 0x0904,
+  WorkflowResult = 0x0905,
+  CancelWorkflow = 0x0906,
+  ListInstances  = 0x0907,
+  WorkflowError  = 0x0908,
 }
