@@ -3,6 +3,8 @@
 // ack_wait_ms, publishes step tasks with idempotent msg_id.
 
 import type { ArbitroClient } from '../client/client'
+import type { Message } from '../message/message'
+import { AckPolicy } from '../types/config'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -26,7 +28,6 @@ interface StepDef {
 }
 
 // ── Task payload encoding ─────────────────────────────────────────────────
-// Format: [instance_id:4 LE][step_index:2 LE][attempt:1][context...]
 
 const TASK_HEADER = 7
 
@@ -44,7 +45,7 @@ function decodeTask(payload: Buffer): { instanceId: number; stepIndex: number; a
   return {
     instanceId: payload.readUInt32LE(0),
     stepIndex: payload.readUInt16LE(4),
-    attempt: payload[6],
+    attempt: payload[6]!,
     context: payload.subarray(TASK_HEADER),
   }
 }
@@ -96,64 +97,53 @@ export class WorkflowBuilder {
     const consumerName = `_wf.${name}.workers`
 
     // Create internal task stream with idempotency.
-    const streamResp = await this.client.createStream(taskStreamName, {
-      subjects: taskSubject,
+    await this.client.createStream(taskStreamName, {
+      subjectFilter: taskSubject,
       idempotencyWindowMs: 300_000,
     })
-    const taskStreamId = streamResp.id
 
-    // Create consumer with ack_wait for failover.
-    await this.client.createConsumer(taskStreamId, {
-      name: consumerName,
-      group: consumerName,
-      filterSubject: taskSubject,
-      maxInflight: this.maxInflight,
-      ackPolicy: 'explicit',
-      deliverMode: 'queue',
-      ackWaitMs: this.ackWaitMs,
-    })
-
-    // Subscribe and process tasks.
+    // Subscribe with consumer group config + callback.
     const steps = this.steps
     const totalSteps = steps.length
-    const sub = await this.client.subscribe(taskStreamId, consumerName, taskSubject)
+    const client = this.client
 
-    const handle = new WorkflowHandle(name, taskStreamId)
-
-    // Processing loop
-    void (async () => {
-      for await (const msg of sub) {
-        const task = decodeTask(msg.payload)
-        if (!task || task.stepIndex >= totalSteps) {
-          msg.ack()
-          continue
-        }
-
-        const handler = steps[task.stepIndex].handler
-        try {
-          const result = await handler({
-            name,
-            instanceId: task.instanceId,
-            stepIndex: task.stepIndex,
-            attempt: task.attempt,
-            context: task.context,
-          })
-
-          const nextStep = task.stepIndex + 1
-          if (nextStep < totalSteps) {
-            const msgId = `wf:${task.instanceId}:${nextStep}:0`
-            const subject = `_wf.${name}.step.${nextStep}`
-            const taskBuf = encodeTask(task.instanceId, nextStep, 0, result.context)
-            await this.client.publishWithId(taskStreamId, subject, msgId, taskBuf)
-          }
-          msg.ack()
-        } catch {
-          msg.nack()
-        }
+    const sub = await this.client.subscribe(taskStreamName, {
+      name: consumerName,
+      filter: taskSubject,
+      ackPolicy: AckPolicy.Explicit,
+      ackWaitMs: this.ackWaitMs,
+      maxAckPending: this.maxInflight,
+    }, async (msg: Message) => {
+      const task = decodeTask(msg.data())
+      if (!task || task.stepIndex >= totalSteps) {
+        msg.ack()
+        return
       }
-    })()
 
-    return handle
+      const handler = steps[task.stepIndex]!.handler
+      try {
+        const result = await handler({
+          name,
+          instanceId: task.instanceId,
+          stepIndex: task.stepIndex,
+          attempt: task.attempt,
+          context: task.context,
+        })
+
+        const nextStep = task.stepIndex + 1
+        if (nextStep < totalSteps) {
+          const msgId = `wf:${task.instanceId}:${nextStep}:0`
+          const subject = `_wf.${name}.step.${nextStep}`
+          const taskBuf = encodeTask(task.instanceId, nextStep, 0, result.context)
+          await client.publish(taskStreamName, subject, taskBuf, { msgId })
+        }
+        msg.ack()
+      } catch {
+        msg.nack()
+      }
+    })
+
+    return new WorkflowHandle(name, taskStreamName, sub)
   }
 }
 
@@ -162,7 +152,8 @@ export class WorkflowBuilder {
 export class WorkflowHandle {
   constructor(
     private readonly workflowName: string,
-    private readonly taskStreamId: number,
+    private readonly taskStreamName: string,
+    private readonly sub: unknown,
   ) {}
 
   get name(): string { return this.workflowName }
@@ -172,7 +163,7 @@ export class WorkflowHandle {
     const msgId = `wf:${instanceId}:0:0`
     const subject = `_wf.${this.workflowName}.step.0`
     const task = encodeTask(instanceId, 0, 0, context)
-    await client.publishWithId(this.taskStreamId, subject, msgId, task)
+    await client.publish(this.taskStreamName, subject, task, { msgId })
     return instanceId
   }
 }
