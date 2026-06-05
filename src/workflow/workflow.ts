@@ -1,10 +1,13 @@
-// Workflow client-side module — mirrors the Rust implementation.
-// Creates internal _wf.{name}.tasks stream, consumer group with
-// ack_wait_ms, publishes step tasks with idempotent msg_id.
+// WorkflowBuilder — fluent builder for linear step pipelines.
+// Mirrors the Rust WorkflowBuilder: trigger streams, saga compensation,
+// max retries with DLQ, context size limits, unique consumer per worker.
 
 import type { ArbitroClient } from '../client/client'
 import type { Message } from '../message/message'
 import { AckPolicy } from '../types/config'
+import { encodeTask } from './task'
+import { WorkflowHandle, allocInstanceId } from './handle'
+import { processMessage, type ProcessorConfig } from './processor'
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -16,154 +19,107 @@ export interface StepContext {
   readonly context: Buffer
 }
 
-export interface StepResult {
-  readonly context: Buffer
-}
+export interface StepResult { readonly context: Buffer }
 
 export type StepHandler = (ctx: StepContext) => Promise<StepResult>
 
-interface StepDef {
+export interface StepDef {
   readonly name: string
   readonly handler: StepHandler
+  compensation: StepHandler | undefined
 }
 
-// ── Task payload encoding ─────────────────────────────────────────────────
+// ── Unique worker ID counter (per process) ────────────────────────────────
 
-const TASK_HEADER = 7
-
-function encodeTask(instanceId: number, stepIndex: number, attempt: number, context: Buffer): Buffer {
-  const buf = Buffer.allocUnsafe(TASK_HEADER + context.length)
-  buf.writeUInt32LE(instanceId, 0)
-  buf.writeUInt16LE(stepIndex, 4)
-  buf[6] = attempt
-  context.copy(buf, TASK_HEADER)
-  return buf
-}
-
-function decodeTask(payload: Buffer): { instanceId: number; stepIndex: number; attempt: number; context: Buffer } | undefined {
-  if (payload.length < TASK_HEADER) return undefined
-  return {
-    instanceId: payload.readUInt32LE(0),
-    stepIndex: payload.readUInt16LE(4),
-    attempt: payload[6]!,
-    context: payload.subarray(TASK_HEADER),
-  }
-}
-
-// ── Instance ID ───────────────────────────────────────────────────────────
-
-let nextInstanceId = 1
+let nextWorkerUid = 1
 
 // ── WorkflowBuilder ───────────────────────────────────────────────────────
 
 export class WorkflowBuilder {
   private triggerSubject: string | undefined
+  private triggerStreamName: string | undefined
   private readonly steps: StepDef[] = []
   private ackWaitMs = 30_000
-  private maxInflight = 10
+  private maxInflightVal = 10
+  private maxRetriesVal = 3
+  private maxContextSizeVal = 256 * 1024
 
   constructor(
     private readonly client: ArbitroClient,
     private readonly workflowName: string,
   ) {}
 
-  trigger(subject: string): this {
-    this.triggerSubject = subject
-    return this
-  }
+  trigger(subject: string): this { this.triggerSubject = subject; return this }
+
+  triggerStream(streamName: string): this { this.triggerStreamName = streamName; return this }
 
   step(name: string, handler: StepHandler): this {
-    this.steps.push({ name, handler })
+    this.steps.push({ name, handler, compensation: undefined })
     return this
   }
 
-  ackWait(ms: number): this {
-    this.ackWaitMs = ms
+  /** Compensation handler for the most recently added step. */
+  compensate(_stepName: string, handler: StepHandler): this {
+    const last = this.steps[this.steps.length - 1]
+    if (last) last.compensation = handler
     return this
   }
 
-  inflight(n: number): this {
-    this.maxInflight = n
-    return this
-  }
+  ackWait(ms: number): this { this.ackWaitMs = ms; return this }
+  inflight(n: number): this { this.maxInflightVal = n; return this }
+  maxRetries(n: number): this { this.maxRetriesVal = n; return this }
+  maxContextSize(bytes: number): this { this.maxContextSizeVal = bytes; return this }
 
   async start(): Promise<WorkflowHandle> {
-    if (!this.triggerSubject) throw new Error('trigger subject required — call .trigger()')
-    if (this.steps.length === 0) throw new Error('at least one step required — call .step()')
+    if (!this.triggerSubject) throw new Error('trigger subject required')
+    if (this.steps.length === 0) throw new Error('at least one step required')
 
     const name = this.workflowName
-    const taskStreamName = `_wf.${name}.tasks`
+    const taskStream = `_wf.${name}.tasks`
     const taskSubject = `_wf.${name}.>`
-    const consumerName = `_wf.${name}.workers`
+    const dlqStream = `_wf.${name}.dlq`
+    const dlqSubject = `_wf.${name}.dlq.>`
 
-    // Create internal task stream with idempotency.
-    await this.client.createStream(taskStreamName, {
-      subjectFilter: taskSubject,
-      idempotencyWindowMs: 300_000,
-    })
+    await this.client.upsertStream(taskStream, { subjectFilter: taskSubject, idempotencyWindowMs: 300_000 })
+    await this.client.upsertStream(dlqStream, { subjectFilter: dlqSubject })
 
-    // Subscribe with consumer group config + callback.
-    const steps = this.steps
-    const totalSteps = steps.length
-    const client = this.client
+    const cfg: ProcessorConfig = {
+      client: this.client, name, taskStreamName: taskStream,
+      dlqStreamName: dlqStream, steps: this.steps,
+      maxContextSize: this.maxContextSizeVal, maxRetries: this.maxRetriesVal,
+    }
 
-    const sub = await this.client.subscribe(taskStreamName, {
-      name: consumerName,
+    const sub = await this.subscribeWorker(cfg, taskStream, taskSubject)
+    const triggerSub = await this.subscribeTrigger(taskStream, name)
+    return new WorkflowHandle(name, taskStream, dlqStream, sub, triggerSub)
+  }
+
+  private async subscribeWorker(cfg: ProcessorConfig, taskStream: string, taskSubject: string) {
+    const uid = nextWorkerUid++
+    return this.client.subscribe(taskStream, {
+      name: `_wf_${cfg.name}_w${uid}`,
+      group: `_wf_${cfg.name}_workers`,
       filter: taskSubject,
       ackPolicy: AckPolicy.Explicit,
       ackWaitMs: this.ackWaitMs,
-      maxAckPending: this.maxInflight,
-    }, async (msg: Message) => {
-      const task = decodeTask(msg.data())
-      if (!task || task.stepIndex >= totalSteps) {
-        msg.ack()
-        return
-      }
-
-      const handler = steps[task.stepIndex]!.handler
-      try {
-        const result = await handler({
-          name,
-          instanceId: task.instanceId,
-          stepIndex: task.stepIndex,
-          attempt: task.attempt,
-          context: task.context,
-        })
-
-        const nextStep = task.stepIndex + 1
-        if (nextStep < totalSteps) {
-          const msgId = `wf:${task.instanceId}:${nextStep}:0`
-          const subject = `_wf.${name}.step.${nextStep}`
-          const taskBuf = encodeTask(task.instanceId, nextStep, 0, result.context)
-          await client.publish(taskStreamName, subject, taskBuf, { msgId })
-        }
-        msg.ack()
-      } catch {
-        msg.nack()
-      }
-    })
-
-    return new WorkflowHandle(name, taskStreamName, sub)
+      maxAckPending: this.maxInflightVal,
+    }, (msg: Message) => { void processMessage(cfg, msg) })
   }
-}
 
-// ── WorkflowHandle ────────────────────────────────────────────────────────
-
-export class WorkflowHandle {
-  constructor(
-    private readonly workflowName: string,
-    private readonly taskStreamName: string,
-    private readonly sub: unknown,
-  ) {}
-
-  get name(): string { return this.workflowName }
-
-  async trigger(client: ArbitroClient, context: Buffer): Promise<number> {
-    const instanceId = nextInstanceId++
-    const msgId = `wf:${instanceId}:0:0`
-    const subject = `_wf.${this.workflowName}.step.0`
-    const task = encodeTask(instanceId, 0, 0, context)
-    await client.publish(this.taskStreamName, subject, task, { msgId })
-    return instanceId
+  private async subscribeTrigger(taskStream: string, name: string) {
+    if (!this.triggerSubject || !this.triggerStreamName) return undefined
+    const subject = this.triggerSubject
+    return this.client.subscribe(this.triggerStreamName, {
+      name: `_wf_${name}_trigger`,
+      filter: subject,
+      ackPolicy: AckPolicy.Explicit,
+      ackWaitMs: this.ackWaitMs,
+      maxAckPending: 1,
+    }, async (msg: Message) => {
+      const id = allocInstanceId()
+      const taskBuf = encodeTask(id, 0, 0, msg.data())
+      await this.client.publish(taskStream, `_wf.${name}.step.0`, taskBuf, { msgId: `wf:${id}:0:0` })
+      msg.ack()
+    })
   }
 }

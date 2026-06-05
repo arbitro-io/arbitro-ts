@@ -248,6 +248,74 @@ await client.publishDelayed("ORDERS", "orders.reminder", payload, 5000); // 5s d
 
 Messages are persisted immediately — survives broker restart.
 
+## Workflow Orchestration
+
+Client-side linear pipelines over Arbitro streams. The broker has no workflow-specific code -- everything uses streams, consumer groups, and idempotent publish.
+
+### WorkflowBuilder API
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `trigger` | `(subject: string) => this` | Subject pattern that triggers new instances. Required. |
+| `triggerStream` | *(not yet implemented)* | Planned: auto-subscribe to an external stream for trigger. |
+| `step` | `(name: string, handler: StepHandler) => this` | Append a processing step. |
+| `compensate` | *(not yet implemented)* | Planned: rollback handler per step (saga pattern). |
+| `maxRetries` | *(not yet implemented)* | Planned: attempts before DLQ. |
+| `maxContextSize` | *(not yet implemented)* | Planned: max context payload in bytes. |
+| `ackWait` | `(ms: number) => this` | Ack timeout for failover (default: 30000). |
+| `inflight` | `(n: number) => this` | Concurrent tasks per worker (default: 10). |
+| `start` | `() => Promise<WorkflowHandle>` | Register streams, consumer, and start processing. |
+
+### WorkflowHandle API
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `trigger` | `(client: ArbitroClient, context: Buffer) => Promise<number>` | Trigger a new workflow instance. Returns the instance ID. |
+| `name` | `string` (getter) | Workflow name. |
+
+### Complete Example
+
+```typescript
+import { ArbitroClient, WorkflowBuilder } from '@arbitro/client'
+import type { StepContext, StepResult } from '@arbitro/client'
+
+const client = new ArbitroClient({ servers: ['127.0.0.1:9898'] })
+await client.connect()
+
+const wf = await new WorkflowBuilder(client, 'order-process')
+  .trigger('orders.created')
+  // Step 1: validate
+  .step('validate', async (ctx: StepContext): Promise<StepResult> => {
+    const validated = await validateOrder(ctx.context)
+    return { context: validated }
+  })
+  // Step 2: charge
+  .step('charge', async (ctx: StepContext): Promise<StepResult> => {
+    const receipt = await chargePayment(ctx.context)
+    return { context: receipt }
+  })
+  // Step 3: ship
+  .step('ship', async (ctx: StepContext): Promise<StepResult> => {
+    const tracking = await createShipment(ctx.context)
+    return { context: tracking }
+  })
+  .ackWait(30_000)
+  .inflight(10)
+  .start()
+
+// Manual trigger
+const instanceId = await wf.trigger(client, Buffer.from('order-123-payload'))
+console.log(`started instance ${instanceId}`)
+```
+
+### Internals
+
+- Tasks flow through `_wf.{name}.tasks` stream with a consumer `_wf.{name}.workers`.
+- Each step transition publishes with `msgId` format `wf:{instance}:{step}:{attempt}` for deduplication.
+- `ackWait` enables failover: if a worker dies, the broker redelivers to another subscriber.
+
+> **Note:** The TypeScript workflow module currently implements the core step pipeline. Compensation (saga), DLQ, `triggerStream`, `maxRetries`, and `maxContextSize` are available in the Rust client and planned for the TS client.
+
 ## Reconnect behavior
 
 The TS client reconnects transport automatically and reattaches active subscriptions and cron jobs after reconnect. That behavior lives in the client, not in the benchmarks. This matters for:

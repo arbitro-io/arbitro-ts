@@ -301,7 +301,7 @@ export class ArbitroClient {
   private async createConsumerRaw(streamName: string, config: ConsumerConfig): Promise<number> {
     const sid = await this.resolveStreamId(streamName)
     const name = Buffer.from(config.name ?? streamName)
-    const group = Buffer.from(config.name ?? streamName)
+    const group = Buffer.from(config.group ?? config.name ?? streamName)
     const filter = Buffer.from(config.filter ?? '')
 
     const ackPolicyByte = config.ackPolicy === AckPolicy.None ? 0 : 1

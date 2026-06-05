@@ -3,4 +3,6 @@
 // Uses existing streams + consumer groups + publish with msg_id.
 // The broker has NO workflow-specific code.
 
-export { WorkflowBuilder, WorkflowHandle, type StepContext, type StepResult, type StepHandler } from './workflow'
+export { WorkflowBuilder, type StepContext, type StepResult, type StepHandler } from './workflow'
+export { WorkflowHandle } from './handle'
+export { COMPENSATION_BIT, encodeTask, decodeTask, type DecodedTask } from './task'

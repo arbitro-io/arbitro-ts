@@ -77,6 +77,8 @@ export interface SubjectInflightLimit {
 
 export interface ConsumerConfig {
   name?:                string   // defaults to stream name when created via stream.consumer()
+  /** Shared consumer group name for round-robin delivery. Defaults to `name`. */
+  group?:               string
   filter?:              string   // defaults to "${streamName}.>" when created via stream.consumer()
   fanout?:              boolean   // broadcast — every subscriber receives every message
   /** Consumer-side ACK policy. None = fire-and-forget delivery, Explicit = consumer must ACK. */
