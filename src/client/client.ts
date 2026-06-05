@@ -22,8 +22,6 @@ import { Message } from '../message/message'
 import { BatchPublishEntry } from '../proto/publish'
 import { CronBuilder } from '../cron/cron-builder'
 import { CronState } from '../cron/cron-state'
-import { WorkflowBuilder } from '../workflow/workflow-builder'
-import { WorkflowState } from '../workflow/workflow-state'
 
 type MsgCallback = (msg: Message) => void
 
@@ -42,7 +40,6 @@ export class ArbitroClient {
   private readonly sidCache = new Map<string, number>()
   private readonly _metrics = new ClientMetrics()
   private readonly _cronState = new CronState()
-  private readonly _workflowState = new WorkflowState()
 
   constructor(config: ClientConfig) {
     this.cfg = { ...DEFAULT_CONFIG, ...config }
@@ -58,7 +55,6 @@ export class ArbitroClient {
     )
     this.conn.setMetrics(this._metrics)
     this.conn.setCronState(this._cronState)
-    this.conn.setWorkflowState(this._workflowState)
     return this
   }
 
@@ -469,13 +465,6 @@ export class ArbitroClient {
   /** Start building a cron job. Call `.every()` then `.run()` to register. */
   cron(name: string): CronBuilder {
     return new CronBuilder(this.conn, this._cronState, name)
-  }
-
-  // ── Workflow ──────────────────────────────────────────────────────────────
-
-  /** Start building a workflow. Call `.trigger()`, `.step()`, then `.start()`. */
-  workflow(name: string): WorkflowBuilder {
-    return new WorkflowBuilder(this.conn, this._workflowState, name)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────

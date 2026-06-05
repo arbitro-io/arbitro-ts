@@ -12,11 +12,6 @@ import type { Logger } from '../common/logger'
 import type { ClientMetrics } from '../client/metrics'
 import { CronState } from '../cron/cron-state'
 import { decodeCronFire, packCronAck, packCreateCron } from '../cron/cron-frame'
-import { WorkflowState } from '../workflow/workflow-state'
-import {
-  decodeWorkflowStep, decodeWorkflowError,
-  packWorkflowResult, packCreateWorkflow,
-} from '../workflow/workflow-frame'
 
 type DeliveryHandler = (frame: Buffer) => void
 
@@ -51,7 +46,6 @@ export class Connection {
   private activeSubs = new Map<number, ActiveSubscription>()
   private metrics?: ClientMetrics
   private cronState?: CronState
-  private workflowState?: WorkflowState
 
   private constructor(
     socket: net.Socket,
@@ -124,8 +118,6 @@ export class Connection {
   /** Attach cron state so the connection can dispatch CronFire frames. */
   setCronState(s: CronState): void { this.cronState = s }
 
-  /** Attach workflow state so the connection can dispatch WorkflowStep/Error frames. */
-  setWorkflowState(s: WorkflowState): void { this.workflowState = s }
 
   // ── Frame routing ─────────────────────────────────────────────────────────
   // Seq-based dispatch: match reply.header.seq → pending request. O(1).
@@ -183,14 +175,6 @@ export class Connection {
       }
       case Action.CronFire: {
         this.dispatchCronFire(frame)
-        return
-      }
-      case Action.WorkflowStep: {
-        this.dispatchWorkflowStep(frame)
-        return
-      }
-      case Action.WorkflowError: {
-        this.dispatchWorkflowError(frame)
         return
       }
       case Action.Pong: return
@@ -263,53 +247,6 @@ export class Connection {
       .catch(() => this.send(packCronAck(this.nextSeq(), nameBuf, false)))
   }
 
-  // ── Workflow dispatch ───────────────────────────────────────────────────────
-
-  private dispatchWorkflowStep(frame: Buffer): void {
-    const body = frame.subarray(HEADER_SIZE)
-    const view = decodeWorkflowStep(body)
-    if (!view) return
-
-    const handler = this.workflowState?.getStepHandler(view.name)
-    const nameBuf = Buffer.from(view.name)
-
-    if (!handler) {
-      // No handler registered — send error result back.
-      this.send(packWorkflowResult(
-        this.nextSeq(), nameBuf, view.instanceId, false, Buffer.alloc(0),
-      ))
-      return
-    }
-
-    handler({
-      name: view.name,
-      instanceId: view.instanceId,
-      stepIndex: view.stepIndex,
-      context: view.context,
-    })
-      .then((ctx) => this.send(packWorkflowResult(
-        this.nextSeq(), nameBuf, view.instanceId, true, ctx,
-      )))
-      .catch(() => this.send(packWorkflowResult(
-        this.nextSeq(), nameBuf, view.instanceId, false, Buffer.alloc(0),
-      )))
-  }
-
-  private dispatchWorkflowError(frame: Buffer): void {
-    const body = frame.subarray(HEADER_SIZE)
-    const view = decodeWorkflowError(body)
-    if (!view) return
-
-    const handler = this.workflowState?.getErrorHandler(view.name)
-    if (handler) {
-      handler({
-        name: view.name,
-        instanceId: view.instanceId,
-        errorJson: view.errorJson,
-      }).catch(() => { /* swallow — user error handler threw */ })
-    }
-  }
-
   // ── Subscriptions ─────────────────────────────────────────────────────────
 
   async sendSubscribeV2(
@@ -354,7 +291,6 @@ export class Connection {
         .catch(() => { })
     }
     this.replayCrons()
-    this.replayWorkflows()
   }
 
   private replayCrons(): void {
@@ -362,14 +298,6 @@ export class Connection {
     for (const { config } of this.cronState.allConfigs()) {
       const seq = this.nextSeq()
       this.socket.write(packCreateCron(seq, config))
-    }
-  }
-
-  private replayWorkflows(): void {
-    if (!this.workflowState) return
-    for (const { config } of this.workflowState.allConfigs()) {
-      const seq = this.nextSeq()
-      this.socket.write(packCreateWorkflow(seq, config))
     }
   }
 
