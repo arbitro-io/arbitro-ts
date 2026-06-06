@@ -339,6 +339,10 @@ npm run test:integration   # requires Docker
 - `.agent/rules/*.md` — internal coding rules (hot-path discipline, wire protocol, etc.).
 - `CLAUDE.md` — index pointing at the rule files.
 
+## Replication
+
+Replication is transparent to the client -- `replicas` is set at `create_stream` time. The client publishes normally; the broker handles replication internally.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
