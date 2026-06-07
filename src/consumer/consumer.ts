@@ -62,6 +62,11 @@ export class Consumer {
     return this.client.getPending(this.streamName, this.name)
   }
 
+  /** Tombstone a single message by seq. Returns true if found. */
+  deleteMessage(seq: bigint): Promise<boolean> {
+    return this.client.deleteMessage(this.streamName, seq)
+  }
+
   // Raw subscribe — Message with manual ack/nack/decode.
   subscribe(cb?: RawCallback, opts?: SubscribeOptions): Promise<Subscription>
 

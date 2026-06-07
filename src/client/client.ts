@@ -7,7 +7,7 @@ import { ClientMetrics, type ClientMetricsSnapshot } from './metrics'
 import { streamPublish, streamPublishAck, streamPublishBatch, streamRequest } from '../stream/publish'
 import {
   packPublish, packCreateStream, packDeleteStream, packGetStream,
-  packPurgeStream, packDrainSubject, packListStreams,
+  packPurgeStream, packDrainSubject, packDeleteMessage, packListStreams,
   packCreateConsumer, packDeleteConsumer, packGetConsumer, packListConsumers,
   packConsumerStats,
   type CreateConsumerOpts,
@@ -289,6 +289,20 @@ export class ArbitroClient {
       packDrainSubject(this.conn.nextSeq(), Buffer.from(streamName), Buffer.from(subject)),
     )
     return Number(refSeq)
+  }
+
+  /**
+   * Tombstone a single message by sequence number.
+   *
+   * The broker marks the entry as deleted — it will never be delivered
+   * to any consumer. Returns `true` if the message was found and
+   * tombstoned, `false` if not found or already tombstoned.
+   */
+  async deleteMessage(streamName: string, seq: bigint): Promise<boolean> {
+    const refSeq = await this.conn.sendExpectReply(
+      packDeleteMessage(this.conn.nextSeq(), Buffer.from(streamName), seq),
+    )
+    return refSeq > 0n
   }
 
   // ── Consumer management ───────────────────────────────────────────────────

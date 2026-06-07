@@ -111,6 +111,11 @@ await client.upsertConsumer('orders', { name: 'workers', filter: 'orders.>' })
 await client.deleteConsumer('workers')
 await client.deleteStream('orders')                        // default: delete metadata + data
 await client.deleteStream('orders', { deleteData: false }) // preserve journal bytes
+
+// Per-message deletion (tombstones a single message by sequence number)
+await client.deleteMessage('orders', 42n)                  // true if deleted, false if not found/already deleted
+await stream.deleteMessage(42n)                            // convenience — delegates to client.deleteMessage
+await consumer.deleteMessage(42n)                          // convenience — delegates to client.deleteMessage
 ```
 
 ## Stream / consumer sugar

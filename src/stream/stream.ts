@@ -84,6 +84,11 @@ export class Stream {
     return this.client.request(this.name, subject, data, timeoutMs)
   }
 
+  /** Tombstone a single message by seq. Returns true if found. */
+  deleteMessage(seq: bigint): Promise<boolean> {
+    return this.client.deleteMessage(this.name, seq)
+  }
+
   // ── Context factories ───────────────────────────────────────────────────
 
   consumer(overrides?: Partial<ConsumerConfig>): Consumer {

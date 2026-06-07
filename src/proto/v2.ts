@@ -8,7 +8,7 @@ export {
 } from './delivery'
 export {
   packCreateStream, packDeleteStream, packGetStream,
-  packPurgeStream, packDrainSubject, packListStreams,
+  packPurgeStream, packDrainSubject, packDeleteMessage, packListStreams,
   type CreateConsumerOpts, type WireSubjectLimit, packCreateConsumer,
   packDeleteConsumer, packGetConsumer, packListConsumers,
   packConsumerStats, packPauseConsumer, packResumeConsumer,

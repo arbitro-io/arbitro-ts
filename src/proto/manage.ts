@@ -68,6 +68,9 @@ export const packDrainSubject = (seq: bigint, name: Buffer, subject: Buffer): Bu
     subject: bytesArr(subject),
   })
 
+export const packDeleteMessage = (seq: bigint, name: Buffer, msgSeq: bigint): Buffer =>
+  packCold(Action.DeleteMessage, seq, { name: bytesArr(name), seq: Number(msgSeq) })
+
 export const packListStreams = (seq: bigint, offset = 0, limit = 1000): Buffer =>
   packCold(Action.ListStreams, seq, { offset: offset >>> 0, limit: limit >>> 0 })
 

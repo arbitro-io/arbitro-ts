@@ -75,12 +75,13 @@ export const enum Action {
   Unsubscribe = 0x0302,
 
   // 0x04xx — Stream management
-  CreateStream = 0x0401,
-  DeleteStream = 0x0402,
-  GetStream    = 0x0403,
-  ListStreams  = 0x0404,
-  PurgeStream  = 0x0405,
-  DrainSubject = 0x0406,
+  CreateStream  = 0x0401,
+  DeleteStream  = 0x0402,
+  GetStream     = 0x0403,
+  ListStreams   = 0x0404,
+  PurgeStream   = 0x0405,
+  DrainSubject  = 0x0406,
+  DeleteMessage = 0x0407,
 
   // 0x05xx — Consumer management
   CreateConsumer = 0x0501,
