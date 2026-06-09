@@ -1,34 +1,11 @@
 # @arbitro/client
 
-Official TypeScript client for the [Arbitro](https://github.com/arbitro-io/arbitro) stateful flow broker.
-
-> Status: under active development. APIs, benchmarks, defaults, and reconnect behavior may still change.
-
-`@arbitro/client` is built for the features that make Arbitro different from a plain pub/sub broker:
-
-- durable streams and consumers
-- exact `stream` / `consumer` introspection and idempotent `upsert`
-- automatic reconnect + subscription reattach
-- subject-level `maxSubjectInflights` — the strongest flow-control feature in the system
-- live `ack_pending` queries per consumer
-- client + broker metrics for observability
-
-## Why Arbitro
-
-The headline feature is **`maxSubjectInflights`** — per-subject in-flight caps with wildcard patterns inside a single consumer group, so one hot subject does not starve the rest of the workload.
-
-That means you can run one worker pool and still say:
-
-- `payments.critical`  → max `1`
-- `payments.heavy.>`   → max `3`
-- `payments.light.>`   → max `10`
-
-without splitting your topology into many queues just to protect fairness.
+Official TypeScript client for the [Arbitro](https://github.com/arbitro-io/arbitro) message broker.
 
 ## Requirements
 
 - Node.js `>= 20`
-- Arbitro broker reachable on `127.0.0.1:9898` or your own `--addr`
+- Arbitro broker reachable on `127.0.0.1:9898`
 
 ## Install
 
@@ -36,21 +13,19 @@ without splitting your topology into many queues just to protect fairness.
 npm install @arbitro/client
 ```
 
-## Run the broker locally (Docker)
-
-The broker ships as a public Docker image (musl-static, ~3 MB, scratch base):
+## Run the Broker (Docker)
 
 ```bash
 docker run --rm -p 9898:9898 ghcr.io/arbitro-io/arbitro-server:latest
 ```
 
-Pin a major/minor tag for production:
+Pin a version tag for production:
 
-- `ghcr.io/arbitro-io/arbitro-server:0.1.0` — immutable release tag
-- `ghcr.io/arbitro-io/arbitro-server:0.1`   — auto-updates within `0.1.*`
-- `ghcr.io/arbitro-io/arbitro-server:latest` — latest tagged release
+- `ghcr.io/arbitro-io/arbitro-server:0.5.3` -- immutable release tag
+- `ghcr.io/arbitro-io/arbitro-server:0.5`   -- auto-updates within `0.5.*`
+- `ghcr.io/arbitro-io/arbitro-server:latest` -- latest tagged release
 
-## Quick start
+## Quick Start
 
 ```typescript
 import { ArbitroClient } from '@arbitro/client'
@@ -72,13 +47,10 @@ const sub = await client.subscribe('workers', (msg) => {
   msg.ack()
 })
 
-// publish() returns Promise<void> — caller decides whether to await.
 await client.publish('orders', 'orders.new', Buffer.from('hello'))
 ```
 
 ## Publish
-
-`publish()` returns `Promise<void>` that resolves once the broker confirms receipt (`RepOk`). The TypeScript idiom is "everything async, the caller chooses to await" — the same call site supports both semantics:
 
 ```typescript
 await client.publish('orders', 'orders.new', data)            // wait for broker ack
@@ -86,9 +58,7 @@ client.publish('orders', 'orders.new', data)                  // fire-and-forget
 client.publish('orders', 'orders.new', data).catch(onError)   // async error path
 ```
 
-The broker emits `RepOk` regardless of whether the caller awaits, so there's no wire-level savings from a "no-reply" variant. That's the property that lets TS expose a single, ergonomic API. Rust's lazy-future model has to pick `publish` (fire-and-forget) vs `publish_sync` (awaited) at the call site.
-
-## Durable management
+## Durable Management
 
 ```typescript
 await client.streamExists('orders')           // true
@@ -100,25 +70,22 @@ await client.getConsumerInfo('workers')       // ConsumerInfo | null
 await client.listConsumers()                  // ConsumerInfo[]
 ```
 
-## Upsert / delete
-
-`upsert*` is strict: it succeeds when the entity does not exist or already exists with an equivalent config. It does not silently mutate a conflicting durable entity.
+## Upsert / Delete
 
 ```typescript
 await client.upsertStream('orders', { subjectFilter: 'orders.>' })
 await client.upsertConsumer('orders', { name: 'workers', filter: 'orders.>' })
 
 await client.deleteConsumer('workers')
-await client.deleteStream('orders')                        // default: delete metadata + data
-await client.deleteStream('orders', { deleteData: false }) // preserve journal bytes
+await client.deleteStream('orders')
+await client.deleteStream('orders', { deleteData: false })
 
-// Per-message deletion (tombstones a single message by sequence number)
-await client.deleteMessage('orders', 42n)                  // true if deleted, false if not found/already deleted
-await stream.deleteMessage(42n)                            // convenience — delegates to client.deleteMessage
-await consumer.deleteMessage(42n)                          // convenience — delegates to client.deleteMessage
+await client.deleteMessage('orders', 42n)
+await stream.deleteMessage(42n)
+await consumer.deleteMessage(42n)
 ```
 
-## Stream / consumer sugar
+## Stream / Consumer Sugar
 
 ```typescript
 const stream = client.stream('orders')
@@ -131,9 +98,7 @@ const sub = await consumer.subscribe((msg) => {
 })
 ```
 
-## Per-subject inflight limits
-
-`maxSubjectInflights` caps the in-flight (delivered, unacked) count per subject pattern, with full wildcard support (`*`, `>`). Only enforced when `ackPolicy: Explicit`; silently dropped for fire-and-forget consumers (the engine doesn't track inflight without acks).
+## Per-Subject Inflight Limits
 
 ```typescript
 import { AckPolicy, DeliverPolicy } from '@arbitro/client'
@@ -152,41 +117,29 @@ await client.createConsumer('orders', {
 })
 ```
 
-## Query pending acks
-
-Live count of messages delivered to a consumer but not yet acked (equivalent of NATS JetStream `num_ack_pending`). One broker round-trip; engine cost is O(1) per shard.
+## Query Pending Acks
 
 ```typescript
-// Via Consumer wrapper
 const consumer = await client.stream('orders')
   .consumer({ name: 'workers' })
   .create()
-await consumer.getPendings()                     // number
+await consumer.getPendings()
 
-// Or directly via client (when you only have the id, or by name)
-await client.getPending(consumerId)              // number
-await client.getPending('orders', 'workers')     // number (resolves id by name)
+await client.getPending(consumerId)
+await client.getPending('orders', 'workers')
 ```
 
-## Client metrics
-
-The client tracks atomic counters readable via `client.metrics()`. Use it as a saturation gauge for dashboards or alerts.
+## Client Metrics
 
 ```typescript
 const snap = client.metrics()
 // {
-//   publishesSent:        12048,
-//   publishBatchEntries:  3210,
-//   deliveriesReceived:   15258,
-//   activeSubscriptions:  7,     // gauge
-//   acksSent:             15101,
-//   nacksSent:            12,
-//   reconnects:           0,
-//   pendingReplies:       0,
+//   publishesSent, publishBatchEntries, deliveriesReceived,
+//   activeSubscriptions, acksSent, nacksSent, reconnects, pendingReplies
 // }
 ```
 
-## Typed lazy decode
+## Typed Lazy Decode
 
 ```typescript
 import { schema } from '@arbitro/client'
@@ -202,9 +155,7 @@ const sub = await client
   })
 ```
 
-### Zod codec (optional)
-
-If you already model your payloads with [zod](https://zod.dev), use `zodCodec` for free runtime validation on decode:
+### Zod Codec (optional)
 
 ```typescript
 import { ArbitroClient, zodCodec } from '@arbitro/client'
@@ -217,16 +168,13 @@ const sub = await client
   .stream('orders')
   .consumer({ name: 'workers', filter: 'orders.>' })
   .subscribe(codec, (msg) => {
-    // msg is typed as `z.output<typeof Order>` — validated on decode
     msg.ack()
   })
 ```
 
-`zod` is an optional peer dependency. `@arbitro/client` references zod only via `import type`, so users who never call `zodCodec` pay zero runtime cost and don't need zod installed.
-
 ## Cron Scheduling
 
-Register distributed cron jobs with queue semantics — multiple workers, single delivery per fire.
+Distributed cron jobs with queue semantics -- multiple workers, single delivery per fire.
 
 ```typescript
 const cron = await client.cron("billing-monthly")
@@ -237,36 +185,34 @@ const cron = await client.cron("billing-monthly")
         await processBilling();
     });
 
-// Stop when done
 await cron.stop();
 ```
 
-Crons re-register automatically on reconnect. No persistence — if the broker restarts, clients re-register their crons when they reconnect.
+Crons re-register automatically on reconnect.
 
 ## Delayed Publish
-
-Schedule message delivery for the future:
 
 ```typescript
 await client.publishDelayed("ORDERS", "orders.reminder", payload, 5000); // 5s delay
 ```
 
-Messages are persisted immediately — survives broker restart.
-
 ## Workflow Orchestration
 
-Client-side linear pipelines over Arbitro streams. The broker has no workflow-specific code -- everything uses streams, consumer groups, and idempotent publish.
+Client-side workflow pipelines over Arbitro streams. The broker has no workflow-specific code -- everything uses streams, consumer groups, and idempotent publish.
 
 ### WorkflowBuilder API
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `trigger` | `(subject: string) => this` | Subject pattern that triggers new instances. Required. |
-| `triggerStream` | *(not yet implemented)* | Planned: auto-subscribe to an external stream for trigger. |
+| `trigger` | `(subject: string) => this` | Subject pattern that triggers new instances. |
+| `triggerStream` | `(streamName: string) => this` | Auto-subscribe to an external stream for trigger. |
+| `source` | `(streamName: string) => this` | External stream as event source. |
 | `step` | `(name: string, handler: StepHandler) => this` | Append a processing step. |
-| `compensate` | *(not yet implemented)* | Planned: rollback handler per step (saga pattern). |
-| `maxRetries` | *(not yet implemented)* | Planned: attempts before DLQ. |
-| `maxContextSize` | *(not yet implemented)* | Planned: max context payload in bytes. |
+| `suspendStep` | `(name: string, handler: SuspendHandler) => this` | Step that can suspend and wait for external resume. |
+| `onTimeout` | `(handler: TimeoutHandler) => this` | Timeout handler for the preceding suspend step. |
+| `compensate` | `(name: string, handler: StepHandler) => this` | Rollback handler per step (saga pattern). |
+| `maxRetries` | `(n: number) => this` | Attempts before DLQ (default: 3). |
+| `maxContextSize` | `(bytes: number) => this` | Max context payload in bytes (default: 256 KB). |
 | `ackWait` | `(ms: number) => this` | Ack timeout for failover (default: 30000). |
 | `inflight` | `(n: number) => this` | Concurrent tasks per worker (default: 10). |
 | `start` | `() => Promise<WorkflowHandle>` | Register streams, consumer, and start processing. |
@@ -275,10 +221,13 @@ Client-side linear pipelines over Arbitro streams. The broker has no workflow-sp
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `trigger` | `(client: ArbitroClient, context: Buffer) => Promise<number>` | Trigger a new workflow instance. Returns the instance ID. |
+| `trigger` | `(client, context: Buffer) => Promise<number>` | Trigger a new workflow instance. Returns the instance ID. |
+| `triggerWithId` | `(client, id: string, context: Buffer) => Promise<void>` | Trigger with an explicit instance ID (dedup-safe). |
+| `resume` | `(client, instanceId: string, payload: Buffer) => Promise<void>` | Resume a suspended workflow instance. |
+| `cancel` | `(client, instanceId: string) => Promise<void>` | Cancel a running or suspended instance. |
 | `name` | `string` (getter) | Workflow name. |
 
-### Complete Example
+### Example
 
 ```typescript
 import { ArbitroClient, WorkflowBuilder } from '@arbitro/client'
@@ -289,17 +238,14 @@ await client.connect()
 
 const wf = await new WorkflowBuilder(client, 'order-process')
   .trigger('orders.created')
-  // Step 1: validate
   .step('validate', async (ctx: StepContext): Promise<StepResult> => {
     const validated = await validateOrder(ctx.context)
     return { context: validated }
   })
-  // Step 2: charge
   .step('charge', async (ctx: StepContext): Promise<StepResult> => {
     const receipt = await chargePayment(ctx.context)
     return { context: receipt }
   })
-  // Step 3: ship
   .step('ship', async (ctx: StepContext): Promise<StepResult> => {
     const tracking = await createShipment(ctx.context)
     return { context: tracking }
@@ -308,46 +254,13 @@ const wf = await new WorkflowBuilder(client, 'order-process')
   .inflight(10)
   .start()
 
-// Manual trigger
 const instanceId = await wf.trigger(client, Buffer.from('order-123-payload'))
-console.log(`started instance ${instanceId}`)
 ```
-
-### Internals
-
-- Tasks flow through `_wf.{name}.tasks` stream with a consumer `_wf.{name}.workers`.
-- Each step transition publishes with `msgId` format `wf:{instance}:{step}:{attempt}` for deduplication.
-- `ackWait` enables failover: if a worker dies, the broker redelivers to another subscriber.
-
-> **Note:** The TypeScript workflow module currently implements the core step pipeline. Compensation (saga), DLQ, `triggerStream`, `maxRetries`, and `maxContextSize` are available in the Rust client and planned for the TS client.
-
-## Reconnect behavior
-
-The TS client reconnects transport automatically and reattaches active subscriptions and cron jobs after reconnect. That behavior lives in the client, not in the benchmarks. This matters for:
-
-- Docker restarts
-- broker failover tests
-- chaos scenarios with durable consumers
-
-## Validation
-
-```bash
-npm run typecheck
-npm test
-npm run test:integration   # requires Docker
-```
-
-## Documentation
-
-- `CONTRIBUTING.md` — dev setup, branch + commit conventions, PR review.
-- `RELEASING.md` — SemVer policy and the npm publish flow.
-- `.agent/rules/*.md` — internal coding rules (hot-path discipline, wire protocol, etc.).
-- `CLAUDE.md` — index pointing at the rule files.
 
 ## Replication
 
-Replication is transparent to the client -- `replicas` is set at `create_stream` time. The client publishes normally; the broker handles replication internally.
+Replication is transparent to the client -- `replicas` is set at `createStream` time. The client publishes normally; the broker handles replication internally.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT -- see [LICENSE](./LICENSE).
