@@ -227,7 +227,7 @@ Client-side workflow pipelines over Arbitro streams. The broker has no workflow-
 | `cancel` | `(client, instanceId: string) => Promise<void>` | Cancel a running or suspended instance. |
 | `name` | `string` (getter) | Workflow name. |
 
-### Example
+### Basic Example
 
 ```typescript
 import { ArbitroClient, WorkflowBuilder } from '@arbitro/client'
@@ -255,6 +255,49 @@ const wf = await new WorkflowBuilder(client, 'order-process')
   .start()
 
 const instanceId = await wf.trigger(client, Buffer.from('order-123-payload'))
+```
+
+### Suspend / Resume / Cancel
+
+```typescript
+const wf = await new WorkflowBuilder(client, 'payment-auth')
+  .trigger('payments.initiated')
+  .step('prepare', async (ctx: StepContext): Promise<StepResult> => {
+    const prepared = await preparePayment(ctx.context)
+    return { context: prepared }
+  })
+  .suspendStep('wait-auth', async (ctx: StepContext): Promise<StepResult> => {
+    await sendAuthLink(ctx.context)
+    return { suspend: true }  // parks the instance until resume
+  })
+  .onTimeout(async (ctx: StepContext): Promise<StepResult> => {
+    await notifyTimeout(ctx.context)
+    return { context: ctx.context }
+  })
+  .step('finalize', async (ctx: StepContext): Promise<StepResult> => {
+    return { context: await finalizePayment(ctx.context) }
+  })
+  .start()
+
+// Trigger with explicit ID (dedup-safe)
+await wf.triggerWithId(client, 'payment-abc-123', Buffer.from(payload))
+
+// Resume a suspended instance (e.g. after user completes auth)
+await wf.resume(client, 'payment-abc-123', Buffer.from(authResult))
+
+// Cancel a running or suspended instance
+await wf.cancel(client, 'payment-abc-123')
+```
+
+### Source (External Stream Triggers)
+
+```typescript
+const wf = await new WorkflowBuilder(client, 'event-driven')
+  .source('external-events')          // subscribe to an existing stream
+  .step('process', async (ctx: StepContext): Promise<StepResult> => {
+    return { context: await processEvent(ctx.context) }
+  })
+  .start()
 ```
 
 ## Replication
