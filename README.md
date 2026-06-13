@@ -206,9 +206,9 @@ Client-side workflow pipelines over Arbitro streams. The broker has no workflow-
 |--------|-----------|-------------|
 | `trigger` | `(subject: string) => this` | Subject pattern that triggers new instances. |
 | `triggerStream` | `(streamName: string) => this` | Auto-subscribe to an external stream for trigger. |
-| `source` | `(streamName: string) => this` | External stream as event source. |
+| `source` | `(streamName: string, subject: string) => this` | External stream as event source. |
 | `step` | `(name: string, handler: StepHandler) => this` | Append a processing step. |
-| `suspendStep` | `(name: string, handler: SuspendHandler) => this` | Step that can suspend and wait for external resume. |
+| `suspendStep` | `(name: string, timeoutMs: number, run: SuspendRunHandler, onResume: ResumeHandler) => this` | Step that can suspend and wait for external resume. |
 | `onTimeout` | `(handler: TimeoutHandler) => this` | Timeout handler for the preceding suspend step. |
 | `compensate` | `(name: string, handler: StepHandler) => this` | Rollback handler per step (saga pattern). |
 | `maxRetries` | `(n: number) => this` | Attempts before DLQ (default: 3). |
@@ -260,21 +260,30 @@ const instanceId = await wf.trigger(client, Buffer.from('order-123-payload'))
 ### Suspend / Resume / Cancel
 
 ```typescript
+import type { StepOutcome, ResumeContext, TimeoutContext } from '@arbitro/client'
+
 const wf = await new WorkflowBuilder(client, 'payment-auth')
   .trigger('payments.initiated')
-  .step('prepare', async (ctx: StepContext): Promise<StepResult> => {
-    const prepared = await preparePayment(ctx.context)
-    return { context: prepared }
+  .step('prepare', async (ctx) => {
+    return { context: await preparePayment(ctx.context) }
   })
-  .suspendStep('wait-auth', async (ctx: StepContext): Promise<StepResult> => {
-    await sendAuthLink(ctx.context)
-    return { suspend: true }  // parks the instance until resume
+  // suspendStep(name, timeoutMs, runHandler, onResumeHandler)
+  .suspendStep('wait-auth', 30_000,
+    // run: called when the step starts — return 'suspend' to park
+    async (ctx): Promise<StepOutcome> => {
+      const state = await sendAuthLink(ctx.context)
+      return { kind: 'suspend', state, timeoutMs: 30_000 }
+    },
+    // onResume: called when wf.resume() arrives with an event
+    async (resume: ResumeContext) => {
+      return { context: await processPaymentResult(resume.state, resume.event) }
+    }
+  )
+  // onTimeout: called if 30s pass without resume
+  .onTimeout(async (timeout: TimeoutContext) => {
+    return { context: await cancelPaymentAuth(timeout.state) }
   })
-  .onTimeout(async (ctx: StepContext): Promise<StepResult> => {
-    await notifyTimeout(ctx.context)
-    return { context: ctx.context }
-  })
-  .step('finalize', async (ctx: StepContext): Promise<StepResult> => {
+  .step('finalize', async (ctx) => {
     return { context: await finalizePayment(ctx.context) }
   })
   .start()
@@ -282,10 +291,10 @@ const wf = await new WorkflowBuilder(client, 'payment-auth')
 // Trigger with explicit ID (dedup-safe)
 await wf.triggerWithId(client, 'payment-abc-123', Buffer.from(payload))
 
-// Resume a suspended instance (e.g. after user completes auth)
-await wf.resume(client, 'payment-abc-123', Buffer.from(authResult))
+// ... later, Stripe webhook confirms payment ...
+await wf.resume(client, 'payment-abc-123', Buffer.from(stripeEvent))
 
-// Cancel a running or suspended instance
+// Or cancel a suspended instance
 await wf.cancel(client, 'payment-abc-123')
 ```
 
@@ -293,8 +302,8 @@ await wf.cancel(client, 'payment-abc-123')
 
 ```typescript
 const wf = await new WorkflowBuilder(client, 'event-driven')
-  .source('external-events')          // subscribe to an existing stream
-  .step('process', async (ctx: StepContext): Promise<StepResult> => {
+  .source('external-events', 'events.>')  // streamName + subject filter
+  .step('process', async (ctx) => {
     return { context: await processEvent(ctx.context) }
   })
   .start()
