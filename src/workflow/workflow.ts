@@ -5,7 +5,7 @@
 import type { ArbitroClient } from '../client/client'
 import type { Message } from '../message/message'
 import { AckPolicy } from '../types/config'
-import { encodeTask } from './task'
+import { encodeTask, decodePark } from './task'
 import { WorkflowHandle, allocInstanceId } from './handle'
 import { processMessage, type ProcessorConfig } from './processor'
 
@@ -149,26 +149,69 @@ export class WorkflowBuilder {
     const dlqStream = `_wf.${name}.dlq`
     const dlqSubject = `_wf.${name}.dlq.>`
 
+    // State stream for cross-worker suspend registry.
+    const stateStream = `_wf_${name}_state`
+    const stateSubject = `_wf.${name}.__state.>`
+
     await this.client.upsertStream(taskStream, { subjectFilter: taskSubject, idempotencyWindowMs: 300_000 })
     await this.client.upsertStream(dlqStream, { subjectFilter: dlqSubject })
+    await this.client.upsertStream(stateStream, { subjectFilter: stateSubject, idempotencyWindowMs: 300_000 })
 
     const suspended = new Map<string, SuspendedEntry>()
+    const nacked = new Set<bigint>()
+
+    // Allocate worker UID once — shared by task consumer and state consumer.
+    const uid = nextWorkerUid++
 
     const cfg: ProcessorConfig = {
       client: this.client, name, taskStreamName: taskStream,
-      dlqStreamName: dlqStream, steps: this.steps,
+      dlqStreamName: dlqStream, stateStreamName: stateStream,
+      steps: this.steps,
       maxContextSize: this.maxContextSizeVal, maxRetries: this.maxRetriesVal,
-      suspended,
+      suspended, nacked,
     }
 
-    const sub = await this.subscribeWorker(cfg, taskStream, taskSubject)
+    // Fanout consumer on state stream — unique per worker (no group).
+    // DeliverPolicy::All replays all park/remove events to build the map.
+    const parkPrefix = `_wf.${name}.__state.park.`
+    const removePrefix = `_wf.${name}.__state.remove.`
+    const stateSub = await this.client.subscribe(stateStream, {
+      name: `_wf_${name}_state_w${uid}`,
+      group: '',
+      fanout: true,
+      filter: stateSubject,
+      ackPolicy: AckPolicy.Explicit,
+      ackWaitMs: 30_000,
+      maxAckPending: 100,
+    }, (msg: Message) => {
+      const subj = msg.subject().toString('utf8')
+      if (subj.startsWith(parkPrefix)) {
+        const iid = subj.slice(parkPrefix.length)
+        const parsed = decodePark(msg.data())
+        if (parsed) {
+          // Only insert if not already present (local insert may have won).
+          if (!suspended.has(iid)) {
+            suspended.set(iid, {
+              stepIndex: parsed.stepIndex,
+              state: Buffer.from(parsed.state),
+              context: Buffer.from(parsed.context),
+            })
+          }
+        }
+      } else if (subj.startsWith(removePrefix)) {
+        const iid = subj.slice(removePrefix.length)
+        suspended.delete(iid)
+      }
+      msg.ack()
+    })
+
+    const sub = await this.subscribeWorkerWithUid(cfg, taskStream, taskSubject, uid)
     const triggerSub = await this.subscribeTrigger(taskStream, name)
     const sourceSubs = await this.subscribeSources(taskStream, name)
-    return new WorkflowHandle(name, taskStream, dlqStream, sub, triggerSub, sourceSubs)
+    return new WorkflowHandle(name, taskStream, dlqStream, sub, triggerSub, sourceSubs, stateSub)
   }
 
-  private async subscribeWorker(cfg: ProcessorConfig, taskStream: string, taskSubject: string) {
-    const uid = nextWorkerUid++
+  private async subscribeWorkerWithUid(cfg: ProcessorConfig, taskStream: string, taskSubject: string, uid: number) {
     return this.client.subscribe(taskStream, {
       name: `_wf_${cfg.name}_w${uid}`,
       group: `_wf_${cfg.name}_workers`,

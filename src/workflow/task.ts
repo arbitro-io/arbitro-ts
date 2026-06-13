@@ -42,3 +42,31 @@ export function decodeTask(payload: Buffer): DecodedTask | undefined {
     context: payload.subarray(header),
   }
 }
+
+// ── Park / Remove encoding (state stream) ──────────────────────────────
+// Format: [step_index:2LE][state_len:4LE][state bytes][context bytes]
+
+export interface DecodedPark {
+  readonly stepIndex: number
+  readonly state: Buffer
+  readonly context: Buffer
+}
+
+export function encodePark(stepIndex: number, state: Buffer, context: Buffer): Buffer {
+  const buf = Buffer.allocUnsafe(2 + 4 + state.length + context.length)
+  buf.writeUInt16LE(stepIndex, 0)
+  buf.writeUInt32LE(state.length, 2)
+  state.copy(buf, 6)
+  context.copy(buf, 6 + state.length)
+  return buf
+}
+
+export function decodePark(payload: Buffer): DecodedPark | undefined {
+  if (payload.length < 6) return undefined
+  const stepIndex = payload.readUInt16LE(0)
+  const stateLen = payload.readUInt32LE(2)
+  if (payload.length < 6 + stateLen) return undefined
+  const state = payload.subarray(6, 6 + stateLen)
+  const context = payload.subarray(6 + stateLen)
+  return { stepIndex, state, context }
+}

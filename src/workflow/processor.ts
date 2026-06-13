@@ -2,7 +2,7 @@
 
 import type { ArbitroClient } from '../client/client'
 import type { Message } from '../message/message'
-import { encodeTask, decodeTask, COMPENSATION_BIT } from './task'
+import { encodeTask, decodeTask, encodePark, COMPENSATION_BIT } from './task'
 import type { StepResult, StepKind, SuspendedEntry, ResumeContext, TimeoutContext } from './workflow'
 
 interface StepDef {
@@ -15,10 +15,14 @@ export interface ProcessorConfig {
   readonly name: string
   readonly taskStreamName: string
   readonly dlqStreamName: string
+  readonly stateStreamName: string
   readonly steps: readonly StepDef[]
   readonly maxContextSize: number
   readonly maxRetries: number
   readonly suspended: Map<string, SuspendedEntry>
+  /** Tracks message seqs nacked once for cross-worker retry.
+   *  Second nack on same seq → ack as stale. */
+  readonly nacked: Set<bigint>
 }
 
 export async function processMessage(cfg: ProcessorConfig, msg: Message): Promise<void> {
@@ -41,9 +45,23 @@ export async function processMessage(cfg: ProcessorConfig, msg: Message): Promis
         try {
           const result = await step.kind.onResume(rctx)
           await advance(cfg, msg, { instanceId, stepIndex: entry.stepIndex }, result)
+          // Publish remove to state stream for cross-worker cleanup.
+          await publishRemove(cfg, instanceId).catch(() => {})
         } catch { msg.nack() }
       } else { msg.ack() }
-    } else { msg.ack() }
+    } else {
+      // Entry not found locally — may be on another worker propagating
+      // via the state stream.  Nack with delay for one retry; if already
+      // retried, ack as stale.
+      const seq = msg.seq()
+      if (!cfg.nacked.has(seq)) {
+        cfg.nacked.add(seq)
+        msg.nackDelay(100)
+      } else {
+        cfg.nacked.delete(seq)
+        msg.ack()
+      }
+    }
     return
   }
 
@@ -62,9 +80,26 @@ export async function processMessage(cfg: ProcessorConfig, msg: Message): Promis
         try {
           const result = await step.kind.onTimeout(tctx)
           await advance(cfg, msg, { instanceId, stepIndex: entry.stepIndex }, result)
+          // Publish remove to state stream for cross-worker cleanup.
+          await publishRemove(cfg, instanceId).catch(() => {})
         } catch { msg.nack() }
-      } else { msg.ack() }
-    } else { msg.ack() }
+      } else {
+        // No timeout handler — discard and remove from state stream.
+        await publishRemove(cfg, instanceId).catch(() => {})
+        msg.ack()
+      }
+    } else {
+      // Not found locally — cross-worker retry.
+      const seq = msg.seq()
+      if (!cfg.nacked.has(seq)) {
+        cfg.nacked.add(seq)
+        msg.nackDelay(100)
+      } else {
+        cfg.nacked.delete(seq)
+        // Already resumed — timeout is stale.
+        msg.ack()
+      }
+    }
     return
   }
 
@@ -73,6 +108,8 @@ export async function processMessage(cfg: ProcessorConfig, msg: Message): Promis
   if (subject.startsWith(cancelPrefix)) {
     const instanceId = subject.slice(cancelPrefix.length)
     cfg.suspended.delete(instanceId)
+    // Publish remove to state stream so ALL workers drop the entry.
+    await publishRemove(cfg, instanceId).catch(() => {})
     msg.ack()
     return
   }
@@ -89,6 +126,24 @@ export async function processMessage(cfg: ProcessorConfig, msg: Message): Promis
   }
   if (task.stepIndex >= cfg.steps.length) { msg.ack(); return }
   await runStep(cfg, msg, task)
+}
+
+// ── Park / Remove state stream helpers ───────────────────────────────
+
+async function publishRemove(cfg: ProcessorConfig, instanceId: string): Promise<void> {
+  const rmSubject = `_wf.${cfg.name}.__state.remove.${instanceId}`
+  const rmMsgId = `wf:${instanceId}:remove`
+  await cfg.client.publish(cfg.stateStreamName, rmSubject, Buffer.alloc(0), { msgId: rmMsgId })
+}
+
+async function publishPark(
+  cfg: ProcessorConfig, instanceId: string,
+  stepIndex: number, state: Buffer, context: Buffer,
+): Promise<void> {
+  const parkSubject = `_wf.${cfg.name}.__state.park.${instanceId}`
+  const parkMsgId = `wf:${instanceId}:park:${stepIndex}`
+  const parkPayload = encodePark(stepIndex, state, context)
+  await cfg.client.publish(cfg.stateStreamName, parkSubject, parkPayload, { msgId: parkMsgId })
 }
 
 // ── Compensation ──────────────────────────────────────────────────────
@@ -131,16 +186,17 @@ async function runStep(
         if (outcome.result.context.length > cfg.maxContextSize) { msg.nack(); return }
         await advance(cfg, msg, task, outcome.result)
       } else {
-        // Suspend: persist in registry and release worker
+        // Suspend: persist in local registry (fast path for same-worker resume).
         cfg.suspended.set(task.instanceId, {
           stepIndex: task.stepIndex,
           state: outcome.state,
           context: task.context,
         })
 
+        // Publish park event to state stream for cross-worker visibility.
+        await publishPark(cfg, task.instanceId, task.stepIndex, outcome.state, task.context).catch(() => {})
+
         // Schedule timeout via local timer + fire-and-forget publish.
-        // We avoid publishDelayed to match the Rust implementation
-        // (in-memory registry = local timer is fine).
         const effectiveTimeout = outcome.timeoutMs > 0
           ? outcome.timeoutMs
           : step.kind.timeoutMs

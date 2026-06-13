@@ -18,6 +18,7 @@ export class WorkflowHandle {
     private readonly sub: unknown,
     private readonly triggerSub: unknown | undefined,
     private readonly sourceSubs: unknown[] = [],
+    private readonly stateSub: unknown | undefined = undefined,
   ) {}
 
   get name(): string { return this.workflowName }
