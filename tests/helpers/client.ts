@@ -1,6 +1,6 @@
 import { ArbitroClient } from '../../src'
 
-export const BROKER_ADDR = '127.0.0.1:9898'
+export const BROKER_ADDR = process.env.ARBITRO_ADDR ?? '127.0.0.1:9898'
 let uniqueCounter = 0
 
 /** Returns a connected ArbitroClient pointing at the always-running arbitro instance. */
