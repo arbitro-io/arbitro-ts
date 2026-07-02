@@ -11,7 +11,7 @@ afterAll(async () => {
 })
 
 describe('publishDelayed', () => {
-  it('delayed message is delivered after the delay', async () => {
+  it('delayed message is delivered after the delay', { timeout: 15_000 }, async () => {
     const name = uniqueName('dly'); created.push(name)
     await client.createStream(name, { subjectFilter: `${name}.>`})
     await client.createConsumer(name, { name, filter: `${name}.>` })
@@ -23,13 +23,13 @@ describe('publishDelayed', () => {
       msg.ack()
     })
 
-    await client.publishDelayed(name, `${name}.later`, Buffer.from('delayed-payload'), 200)
+    await client.publishDelayed(name, `${name}.later`, Buffer.from('delayed-payload'), 5_000)
 
-    await waitUntil(() => received.length >= 1, 5_000)
+    await waitUntil(() => received.length >= 1, 10_000)
     sub.close()
 
     expect(received[0].data).toBe('delayed-payload')
-    expect(received[0].elapsed).toBeGreaterThanOrEqual(150)
+    expect(received[0].elapsed).toBeGreaterThanOrEqual(4_500)
   })
 
   it('multiple delayed messages with different delays are all accepted', async () => {
