@@ -1,7 +1,8 @@
 import { packPublish, packPublishBatch, packPublishWithReply } from '../proto/v2'
-import { Flag } from '../proto/constants'
+import { EntryFlag, Flag } from '../proto/constants'
 import type { Connection } from '../net/connection'
 import { BatchPublishEntry } from '../proto/publish'
+import { encodeExtendedPayload, extractMsgId, type HeaderMap } from '../proto/headers'
 
 const EMPTY = Buffer.alloc(0)
 
@@ -12,14 +13,41 @@ const EMPTY = Buffer.alloc(0)
  * target stream was created with `idempotencyWindowMs > 0`. Empty or
  * undefined means "no dedup for this publish" — safe to omit on
  * non-idempotent streams.
+ *
+ * `headers` attaches arbitrary key-value metadata. Headers are persisted
+ * alongside the payload and stripped on delivery — consumers always
+ * receive only the user payload.
  */
 export interface PublishOpts {
   msgId?: Buffer | string
+  headers?: HeaderMap
 }
 
 function toMsgIdBuf(id: PublishOpts['msgId']): Buffer {
   if (id == null) return EMPTY
   return typeof id === 'string' ? Buffer.from(id) : id
+}
+
+function buildPayloadAndFlags(
+  data: Buffer, opts?: PublishOpts,
+): { payload: Buffer; entryFlags: number; msgId: Buffer } {
+  if (!opts?.headers || Object.keys(opts.headers).length === 0) {
+    return { payload: data, entryFlags: 0, msgId: toMsgIdBuf(opts?.msgId) }
+  }
+  const headers = { ...opts.headers }
+  let msgId = extractMsgId(headers)
+  if (!msgId && opts.msgId) {
+    const id = toMsgIdBuf(opts.msgId)
+    if (id.length > 0) {
+      headers['msg-id'] = id
+      msgId = id
+    }
+  }
+  return {
+    payload: encodeExtendedPayload(data, headers),
+    entryFlags: EntryFlag.HasHeaders,
+    msgId: msgId ?? EMPTY,
+  }
 }
 
 /** Fire-and-forget publish. Caller provides pre-resolved stream_id. */
@@ -28,7 +56,8 @@ export function streamPublish(
   opts?: PublishOpts,
 ): void {
   const subj = Buffer.from(subject)
-  conn.send(packPublish(conn.nextSeq(), sid, subj, data, 0, 0, toMsgIdBuf(opts?.msgId)))
+  const { payload, entryFlags, msgId } = buildPayloadAndFlags(data, opts)
+  conn.send(packPublish(conn.nextSeq(), sid, subj, payload, 0, entryFlags, msgId))
 }
 
 /** Publish + wait for server RepOk confirmation. */
@@ -37,8 +66,9 @@ export async function streamPublishAck(
   opts?: PublishOpts,
 ): Promise<void> {
   const subj = Buffer.from(subject)
+  const { payload, entryFlags, msgId } = buildPayloadAndFlags(data, opts)
   await conn.sendExpectReply(
-    packPublish(conn.nextSeq(), sid, subj, data, Flag.AckReq, 0, toMsgIdBuf(opts?.msgId)),
+    packPublish(conn.nextSeq(), sid, subj, payload, Flag.AckReq, entryFlags, msgId),
   )
 }
 

@@ -22,6 +22,7 @@ import { Message } from '../message/message'
 import { BatchPublishEntry } from '../proto/publish'
 import { CronBuilder } from '../cron/cron-builder'
 import { CronState } from '../cron/cron-state'
+import { ServiceBuilder } from '../service'
 
 type MsgCallback = (msg: Message) => void
 
@@ -472,6 +473,13 @@ export class ArbitroClient {
 
   stream(name: string, config?: StreamConfig): Stream {
     return new Stream(this, name, config)
+  }
+
+  // ── Service (RPC) ─────────────────────────────────────────────────────────
+
+  /** Create a service builder. Call `.build()` to finalize. */
+  service(name: string): ServiceBuilder {
+    return new ServiceBuilder(this, this.conn, name)
   }
 
   // ── Cron ──────────────────────────────────────────────────────────────────

@@ -202,11 +202,11 @@ export class Connection {
 
       const tailEnd = off + dataLen
       if (tailEnd > frame.length) break
-      const payloadLen = dataLen - subjectLen - replyLen
 
       const handler = this.routes.get(consumerId)
       if (handler) {
-        const bodyLen = 12 + subjectLen + payloadLen
+        const payloadLen = dataLen - subjectLen - replyLen
+        const bodyLen = 12 + subjectLen + replyLen + payloadLen
         const single = Buffer.allocUnsafe(HEADER_SIZE + bodyLen)
         single.writeUInt16LE(Action.Deliver, 0)
         single[2] = 0; single[3] = 0
@@ -215,10 +215,11 @@ export class Connection {
         single.writeUInt32LE(consumerId, HEADER_SIZE)
         single.writeUInt32LE(subjectHash, HEADER_SIZE + 4)
         single.writeUInt16LE(subjectLen, HEADER_SIZE + 8)
-        single.writeUInt16LE(0, HEADER_SIZE + 10)
-        frame.copy(single, HEADER_SIZE + 12, off, off + subjectLen)
-        frame.copy(single, HEADER_SIZE + 12 + subjectLen,
-          off + subjectLen + replyLen, tailEnd)
+        single.writeUInt16LE(replyLen, HEADER_SIZE + 10)
+        let dst = HEADER_SIZE + 12
+        frame.copy(single, dst, off, off + subjectLen); dst += subjectLen
+        frame.copy(single, dst, off + subjectLen, off + subjectLen + replyLen); dst += replyLen
+        frame.copy(single, dst, off + subjectLen + replyLen, tailEnd)
         if (this.metrics) this.metrics.deliveriesReceived++
         handler(single)
       }

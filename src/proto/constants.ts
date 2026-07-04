@@ -41,6 +41,7 @@ export const enum EntryFlag {
   Retain         = 0x01,
   Compressed     = 0x02,
   NoBackpressure = 0x04,
+  HasHeaders     = 0x10,
 }
 
 // ── Action codes (0xFFGG: FF=family, GG=variant) ────────────────────────
@@ -54,8 +55,6 @@ export const enum Action {
   PublishAccumulate       = 0x0102,
   PublishBatch            = 0x0103,
   PublishWithReply        = 0x0104,
-  PublishWithHeaders      = 0x0105,
-  PublishBatchWithHeaders = 0x0106,
 
   // 0x02xx — Delivery / Ack
   Deliver      = 0x0200,

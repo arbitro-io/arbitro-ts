@@ -16,6 +16,8 @@ export { Stream } from "./stream";
 export { Topic } from "./topic";
 export { CronBuilder, CronHandle } from "./cron";
 export type { CronContext, CronHandler } from "./cron";
+export { Service, ServiceBuilder } from "./service";
+export type { ServiceHandler, ServiceConfig } from "./service";
 export { WorkflowBuilder, WorkflowHandle, COMPENSATION_BIT } from "./workflow";
 export type { StepContext, StepResult, StepHandler, DecodedTask } from "./workflow";
 

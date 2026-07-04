@@ -56,6 +56,42 @@ await client.publish('orders', 'orders.new', Buffer.from('hello'))
 await client.publish('orders', 'orders.new', data)            // wait for broker ack
 client.publish('orders', 'orders.new', data)                  // fire-and-forget
 client.publish('orders', 'orders.new', data).catch(onError)   // async error path
+
+// With dedup (idempotency)
+await client.publish('orders', 'orders.new', data, { msgId: 'order-abc-123' })
+```
+
+## Publish with Headers
+
+Attach arbitrary key-value metadata to messages. Headers are persisted alongside the payload and stripped on delivery -- consumers always receive only the user payload.
+
+```typescript
+await client.publish('orders', 'orders.created', data, {
+  headers: {
+    'trace-id': 'abc-123',
+    'source': 'checkout-svc',
+  },
+})
+
+// Headers + dedup
+await client.publish('orders', 'orders.created', data, {
+  msgId: 'order-abc-123',
+  headers: { priority: 'high', region: 'us-east-1' },
+})
+
+// Batch with headers
+await client.publishBatch('orders', [
+  { subject: 'orders.a', data: payloadA, headers: { priority: 'high' } },
+  { subject: 'orders.b', data: payloadB, headers: { priority: 'low' } },
+])
+```
+
+Headers use a zero-copy TLV wire format -- no serialization overhead. The broker persists them with the entry and strips them at delivery time.
+
+## Delayed Publish
+
+```typescript
+await client.publishDelayed('orders', 'orders.reminder', payload, 5000) // 5s delay
 ```
 
 ## Durable Management
@@ -190,11 +226,44 @@ await cron.stop();
 
 Crons re-register automatically on reconnect.
 
-## Delayed Publish
+## Service (Request/Reply RPC)
+
+Build named services with automatic stream/consumer creation, handler dispatch, and correlated request/reply.
 
 ```typescript
-await client.publishDelayed("ORDERS", "orders.reminder", payload, 5000); // 5s delay
+import { ArbitroClient, Service, ServiceBuilder } from '@arbitro/client'
+
+const client = new ArbitroClient({ servers: ['127.0.0.1:9898'] })
+await client.connect()
+
+// Build a service — creates backing stream + consumer automatically
+const svc = await client.service('calculator').setMaxInflight(1024).build()
+
+// Register method handlers
+svc.handle('add', (msg) => {
+  const result = compute(msg.data())
+  msg.reply(Buffer.from(`sum=${result}`))
+  msg.ack()
+})
+
+svc.handle('multiply', (msg) => {
+  msg.reply(Buffer.from(`product=${computeMul(msg.data())}`))
+  msg.ack()
+})
+
+// Send a request to another service (or self)
+const response = await svc.request('calculator', 'add', Buffer.from('2+3'), 5000)
+console.log(response.toString()) // "sum=5"
+
+// Fire-and-forget
+await svc.send('audit', 'log', Buffer.from('event-data'))
+
+// Cross-service RPC
+const gateway = await client.service('gateway').build()
+const resp = await gateway.request('calculator', 'multiply', Buffer.from('3*4'), 5000)
 ```
+
+`msg.reply()` always works -- no need to check for reply_to presence.
 
 ## Workflow Orchestration
 
@@ -267,19 +336,15 @@ const wf = await new WorkflowBuilder(client, 'payment-auth')
   .step('prepare', async (ctx) => {
     return { context: await preparePayment(ctx.context) }
   })
-  // suspendStep(name, timeoutMs, runHandler, onResumeHandler)
   .suspendStep('wait-auth', 30_000,
-    // run: called when the step starts — return 'suspend' to park
     async (ctx): Promise<StepOutcome> => {
       const state = await sendAuthLink(ctx.context)
       return { kind: 'suspend', state, timeoutMs: 30_000 }
     },
-    // onResume: called when wf.resume() arrives with an event
     async (resume: ResumeContext) => {
       return { context: await processPaymentResult(resume.state, resume.event) }
     }
   )
-  // onTimeout: called if 30s pass without resume
   .onTimeout(async (timeout: TimeoutContext) => {
     return { context: await cancelPaymentAuth(timeout.state) }
   })
@@ -302,7 +367,7 @@ await wf.cancel(client, 'payment-abc-123')
 
 ```typescript
 const wf = await new WorkflowBuilder(client, 'event-driven')
-  .source('external-events', 'events.>')  // streamName + subject filter
+  .source('external-events', 'events.>')
   .step('process', async (ctx) => {
     return { context: await processEvent(ctx.context) }
   })
