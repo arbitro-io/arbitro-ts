@@ -239,16 +239,16 @@ await client.connect()
 // Build a service — creates backing stream + consumer automatically
 const svc = await client.service('calculator').setMaxInflight(1024).build()
 
-// Register method handlers
-svc.handle('add', (msg) => {
-  const result = compute(msg.data())
-  msg.reply(Buffer.from(`sum=${result}`))
-  msg.ack()
+// Register method handlers.
+// Return a Buffer — the framework replies to the requester (if a reply
+// address is present) and acks the delivery. Throw to nack. Return
+// undefined to ack without replying.
+svc.handle('add', (req) => {
+  return Buffer.from(`sum=${compute(req.data())}`)
 })
 
-svc.handle('multiply', (msg) => {
-  msg.reply(Buffer.from(`product=${computeMul(msg.data())}`))
-  msg.ack()
+svc.handle('multiply', (req) => {
+  return Buffer.from(`product=${computeMul(req.data())}`)
 })
 
 // Send a request to another service (or self)

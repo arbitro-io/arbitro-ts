@@ -9,7 +9,58 @@ import { ArbitroError } from '../types/error'
 const SVC_PREFIX = '_svc.'
 const REPLY_INFIX = '._r.'
 
-export type ServiceHandler = (msg: Message) => void | Promise<void>
+/**
+ * Incoming service request. Read-only view over the delivered message —
+ * intentionally does not expose ack/nack/reply. Ack, nack, and reply are
+ * managed by the framework based on the handler's return value.
+ */
+export class Request {
+  constructor(
+    private readonly _subject: Buffer,
+    private readonly _payload: Buffer,
+    private readonly _hasReply: boolean,
+    private readonly _seq: bigint,
+    private readonly _consumerId: number,
+  ) {}
+
+  /** Full subject (e.g., `_svc.orders.charge`). */
+  subject(): Buffer { return this._subject }
+
+  /** Payload bytes. */
+  data(): Buffer { return this._payload }
+
+  /** `true` if the requester is waiting for a reply. */
+  hasReply(): boolean { return this._hasReply }
+
+  /** Delivery sequence assigned by the broker. */
+  seq(): bigint { return this._seq }
+
+  /** Consumer id that received this request. */
+  consumerId(): number { return this._consumerId }
+
+  /**
+   * Method segment after the service prefix (e.g., `charge`).
+   * Returns `undefined` if the subject is malformed.
+   */
+  method(serviceName: string): Buffer | undefined {
+    const prefixLen = SVC_PREFIX.length + serviceName.length + 1
+    if (this._subject.length <= prefixLen) return undefined
+    return this._subject.subarray(prefixLen)
+  }
+}
+
+/**
+ * Handler for incoming service requests.
+ *
+ * Return value semantics (framework handles ack/nack/reply automatically):
+ * - Return `Buffer` — framework replies to the requester (if a reply
+ *   address is present) and acks the delivery.
+ * - Return `void` / `undefined` — framework acks without replying.
+ * - Throw / reject — framework nacks the delivery for redelivery.
+ *
+ * The framework guarantees exactly one ack or nack per invocation.
+ */
+export type ServiceHandler = (req: Request) => Buffer | void | Promise<Buffer | void>
 
 export interface ServiceConfig {
   maxInflight?: number
@@ -100,7 +151,25 @@ export class Service {
 
     for (const [prefix, handler] of this.handlers) {
       if (subject.startsWith(prefix)) {
-        Promise.resolve(handler(msg)).catch(() => {})
+        const hasReply = msg.replyTo().length > 0
+        const req = new Request(
+          msg.subject(),
+          msg.data(),
+          hasReply,
+          msg.seq(),
+          msg.consumerId(),
+        )
+        Promise.resolve(handler(req)).then(
+          (response) => {
+            if (response && response.length > 0 && hasReply) {
+              try { msg.reply(response) } catch { /* channel closed */ }
+            }
+            msg.ack()
+          },
+          () => {
+            msg.nack()
+          },
+        )
         return
       }
     }
