@@ -1,6 +1,6 @@
 {
   "name": "@arbitro/client",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "description": "Official TypeScript client for the Arbitro message broker",
   "keywords": [
     "arbitro",
