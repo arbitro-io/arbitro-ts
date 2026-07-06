@@ -7,7 +7,15 @@ import { Flag, HEADER_SIZE } from '../proto/constants'
 import { ArbitroError } from '../types/error'
 
 const SVC_PREFIX = '_svc.'
+const METHOD_INFIX = '.m.'
 const REPLY_INFIX = '._r.'
+
+let NEXT_INSTANCE_ID = 1
+function nextInstanceId(): number {
+  const id = NEXT_INSTANCE_ID++
+  if (NEXT_INSTANCE_ID > 0xFFFFFFFF) NEXT_INSTANCE_ID = 1
+  return id
+}
 
 /**
  * Incoming service request. Read-only view over the delivered message —
@@ -43,7 +51,8 @@ export class Request {
    * Returns `undefined` if the subject is malformed.
    */
   method(serviceName: string): Buffer | undefined {
-    const prefixLen = SVC_PREFIX.length + serviceName.length + 1
+    // Subject: _svc.<serviceName>.m.<method>
+    const prefixLen = SVC_PREFIX.length + serviceName.length + METHOD_INFIX.length
     if (this._subject.length <= prefixLen) return undefined
     return this._subject.subarray(prefixLen)
   }
@@ -72,6 +81,7 @@ export class Service {
   private readonly pending = new Map<number, { resolve: (data: Buffer) => void; timer: ReturnType<typeof setTimeout> }>()
   private corrId = 0
   private closed = false
+  readonly instanceId: number = nextInstanceId()
 
   constructor(
     private readonly name: string,
@@ -83,15 +93,15 @@ export class Service {
   }
 
   handle(method: string, handler: ServiceHandler): void {
-    const prefix = `${SVC_PREFIX}${this.name}.${method}`
+    const prefix = `${SVC_PREFIX}${this.name}${METHOD_INFIX}${method}`
     this.handlers.set(prefix, handler)
   }
 
   async request(target: string, method: string, payload: Buffer, timeoutMs = 5000): Promise<Buffer> {
     const targetStreamId = await this.resolveStream(target)
     const corrId = ++this.corrId
-    const subject = Buffer.from(`${SVC_PREFIX}${target}.${method}`)
-    const replySubject = `${SVC_PREFIX}${this.name}${REPLY_INFIX}${corrId}`
+    const subject = Buffer.from(`${SVC_PREFIX}${target}${METHOD_INFIX}${method}`)
+    const replySubject = `${SVC_PREFIX}${this.name}${REPLY_INFIX}${this.instanceId}.${corrId}`
 
     const replyTo = Buffer.allocUnsafe(5 + replySubject.length)
     replyTo[0] = REPLY_TO_MAGIC
@@ -119,7 +129,7 @@ export class Service {
 
   async send(target: string, method: string, payload: Buffer): Promise<void> {
     const targetStreamId = await this.resolveStream(target)
-    const subject = Buffer.from(`${SVC_PREFIX}${target}.${method}`)
+    const subject = Buffer.from(`${SVC_PREFIX}${target}${METHOD_INFIX}${method}`)
     this.conn.send(packPublish(this.conn.nextSeq(), targetStreamId, subject, payload, Flag.AckReq, 0))
   }
 
@@ -133,7 +143,8 @@ export class Service {
   _dispatch(msg: Message): void {
     if (this.closed) return
     const subject = msg.subject().toString()
-    const replyPrefix = `${SVC_PREFIX}${this.name}${REPLY_INFIX}`
+    // Reply subject: `_svc.<name>._r.<instanceId>.<corrId>` — instance-scoped.
+    const replyPrefix = `${SVC_PREFIX}${this.name}${REPLY_INFIX}${this.instanceId}.`
 
     if (subject.startsWith(replyPrefix)) {
       const corrStr = subject.slice(replyPrefix.length)
@@ -207,25 +218,30 @@ export class ServiceBuilder {
 
   async build(): Promise<Service> {
     const streamName = `_svc-${this.name}`
-    const filter = `${SVC_PREFIX}${this.name}.>`
+    // Stream captures BOTH method and reply subjects.
+    const streamFilter = `${SVC_PREFIX}${this.name}.>`
 
     const streamRef = await this.conn.sendExpectReply(
       packCreateStream(
         this.conn.nextSeq(),
         Buffer.from(streamName),
-        Buffer.from(filter),
+        Buffer.from(streamFilter),
         0n, 0n, 3600n, 1, 0, 0, 0, 0,
       ),
     )
     const streamId = Number(streamRef & 0xFFFFFFFFn)
 
-    const consumerName = `_svc-${this.name}-worker`
-    const consumerRef = await this.conn.sendExpectReply(
+    const svc = new Service(this.name, streamId, this.conn, this.client)
+
+    // Worker consumer: queue-grouped, receives ONLY method calls (`.m.>`).
+    const workerFilter = `${SVC_PREFIX}${this.name}${METHOD_INFIX}>`
+    const workerName = `_svc-${this.name}-worker`
+    const workerRef = await this.conn.sendExpectReply(
       packCreateConsumer(this.conn.nextSeq(), {
         streamId,
-        name: Buffer.from(consumerName),
-        group: Buffer.from(consumerName),
-        filter: Buffer.from(filter),
+        name: Buffer.from(workerName),
+        group: Buffer.from(workerName),
+        filter: Buffer.from(workerFilter),
         maxInflight: this.maxInflight,
         ackPolicy: 1,
         deliverPolicy: 0,
@@ -234,16 +250,35 @@ export class ServiceBuilder {
         startSeq: 0n,
       }),
     )
-    const consumerId = Number(consumerRef & 0xFFFFFFFFn)
+    const workerConsumerId = Number(workerRef & 0xFFFFFFFFn)
 
-    const svc = new Service(this.name, streamId, this.conn, this.client)
+    // Reply consumer: per-instance, NO group — replies MUST NOT be
+    // load-balanced to sibling instances.
+    const replyFilter = `${SVC_PREFIX}${this.name}${REPLY_INFIX}${svc.instanceId}.>`
+    const replyName = `_svc-${this.name}-reply-${svc.instanceId}`
+    const replyRef = await this.conn.sendExpectReply(
+      packCreateConsumer(this.conn.nextSeq(), {
+        streamId,
+        name: Buffer.from(replyName),
+        group: Buffer.from(''),
+        filter: Buffer.from(replyFilter),
+        maxInflight: this.maxInflight,
+        ackPolicy: 1,
+        deliverPolicy: 1, // DeliverPolicy::New — only future replies
+        deliverMode: 0,
+        ackWaitMs: 30_000,
+        startSeq: 0n,
+      }),
+    )
+    const replyConsumerId = Number(replyRef & 0xFFFFFFFFn)
 
     const handler = (frame: Buffer) => {
       const msg = new Message(frame, (f) => this.conn.send(f), () => this.conn.nextSeq())
       svc._dispatch(msg)
     }
 
-    await this.conn.sendSubscribeV2(consumerId, Buffer.from(filter), handler)
+    await this.conn.sendSubscribeV2(workerConsumerId, Buffer.from(workerFilter), handler)
+    await this.conn.sendSubscribeV2(replyConsumerId, Buffer.from(replyFilter), handler)
     return svc
   }
 }
