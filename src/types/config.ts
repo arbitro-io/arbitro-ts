@@ -146,9 +146,32 @@ export interface ReconnectConfig {
 
 export interface TlsConfig {
   enabled?: boolean
-  ca?:      Buffer | string
+  ca?:      Buffer | string | Array<Buffer | string>
   cert?:    Buffer | string
   key?:     Buffer | string
+  /**
+   * SNI / cert-hostname override. Mirrors the Rust client's
+   * `TlsConfig::server_name` (see `arbitro-client-tokio/src/config.rs`).
+   * Defaults to the connection's `host` when unset.
+   */
+  serverName?: string
+  /**
+   * Set to `false` to accept invalid/self-signed certs (dev only) —
+   * mirrors `TlsConfig::danger_accept_invalid_certs` in the Rust client.
+   * Default: `true`.
+   */
+  rejectUnauthorized?: boolean
+}
+
+/**
+ * Client-side heartbeat / dead-connection watchdog. Mirrors the Rust
+ * client's `conn/heartbeat.rs`: a header-only Ping is sent every
+ * `intervalMs`; if no Pong is observed within `timeoutMs` the socket is
+ * destroyed, which triggers the existing reconnect path.
+ */
+export interface KeepAliveConfig {
+  intervalMs?: number   // default: 30_000
+  timeoutMs?:  number   // default: 60_000
 }
 
 export interface ClientConfig {
@@ -157,6 +180,7 @@ export interface ClientConfig {
   timeout?:   number
   reconnect?: ReconnectConfig
   tls?:       TlsConfig
+  keepAlive?: KeepAliveConfig
   // Pino-compatible logger. Default: silent.
   logger?:    import('../common/logger').Logger
 }

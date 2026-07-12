@@ -1,12 +1,12 @@
 import * as net from 'net'
 import * as tls from 'tls'
 import { Framer } from '../proto/framer'
-import { packHello, packSubscribe, packUnsubscribe, packDisconnect } from '../proto/v2'
+import { packHello, packSubscribe, packUnsubscribe, packDisconnect, packPing } from '../proto/v2'
 import {
   Action, HEADER_SIZE, OFF_ACTION, OFF_SEQ, OFF_MSG_LEN,
 } from '../proto/constants'
 import { ArbitroError } from '../types/error'
-import type { TlsConfig, ReconnectConfig } from '../types/config'
+import type { TlsConfig, ReconnectConfig, KeepAliveConfig } from '../types/config'
 import { resolveLogger } from '../common/logger'
 import type { Logger } from '../common/logger'
 import type { ClientMetrics } from '../client/metrics'
@@ -46,12 +46,16 @@ export class Connection {
   private activeSubs = new Map<number, ActiveSubscription>()
   private metrics?: ClientMetrics
   private cronState?: CronState
+  private heartbeatTimer?: ReturnType<typeof setInterval> | undefined
+  private lastPongMs = 0
 
   private constructor(
     socket: net.Socket,
     private readonly reconnectAddr?: { host: string; port: number },
     private readonly reconnectCfg?: ReconnectConfig,
     logger?: Logger,
+    private readonly tlsCfg?: TlsConfig,
+    private readonly keepAliveCfg?: KeepAliveConfig,
   ) {
     this.log = resolveLogger(logger)
     this.socket = socket
@@ -71,6 +75,7 @@ export class Connection {
     tlsCfg?: TlsConfig,
     reconnectCfg?: ReconnectConfig,
     logger?: Logger,
+    keepAliveCfg?: KeepAliveConfig,
   ): Promise<Connection> {
     const parsed = parseAddr(addr)
     const { host, port } = parsed
@@ -79,29 +84,39 @@ export class Connection {
         () => reject(new ArbitroError('connect timeout', 'connect')),
         timeoutMs,
       )
-      const done = (socket: net.Socket) => {
+      Connection.dial(host, port, tlsCfg).then((socket) => {
         clearTimeout(timer)
-        const conn = new Connection(socket, parsed, reconnectCfg, logger)
+        const conn = new Connection(socket, parsed, reconnectCfg, logger, tlsCfg, keepAliveCfg)
         socket.write(packHello())
+        conn.startHeartbeat()
         conn.log.info({ host, port }, 'arbitro connected (v2)')
         resolve(conn)
-      }
-      const fail = (e: Error) => { clearTimeout(timer); reject(e) }
+      }).catch((e: Error) => { clearTimeout(timer); reject(e) })
+    })
+  }
 
+  /**
+   * Dial a raw socket — plain TCP or TLS depending on `tlsCfg`. Shared by
+   * the initial `connect()` and `tryReconnect()` so a reconnect preserves
+   * TLS instead of silently downgrading to plaintext.
+   */
+  private static dial(host: string, port: number, tlsCfg?: TlsConfig): Promise<net.Socket> {
+    return new Promise((resolve, reject) => {
       if (tlsCfg) {
         const s = tls.connect({
           host, port,
+          servername: tlsCfg.serverName ?? host,
+          rejectUnauthorized: tlsCfg.rejectUnauthorized ?? true,
           ca: tlsCfg.ca,
           cert: tlsCfg.cert,
           key: tlsCfg.key,
-          rejectUnauthorized: true,
         })
-        s.once('secureConnect', () => done(s))
-        s.once('error', fail)
+        s.once('secureConnect', () => resolve(s))
+        s.once('error', reject)
       } else {
         const s = net.createConnection({ host, port })
-        s.once('connect', () => done(s))
-        s.once('error', fail)
+        s.once('connect', () => resolve(s))
+        s.once('error', reject)
       }
     })
   }
@@ -187,7 +202,10 @@ export class Connection {
         this.dispatchCronFire(frame)
         return
       }
-      case Action.Pong: return
+      case Action.Pong: {
+        this.lastPongMs = Date.now()
+        return
+      }
       default: {
         // Silently drop unknown actions (matches Rust client behavior)
         this.log.debug({ action: `0x${action.toString(16)}` }, 'unknown action, dropped')
@@ -363,10 +381,40 @@ export class Connection {
     })
   }
 
+  // ── Heartbeat / dead-connection watchdog ──────────────────────────────────
+  // Mirrors arbitro-client-tokio/src/conn/heartbeat.rs: a header-only Ping
+  // is sent every `intervalMs`; if no Pong lands within `timeoutMs` the
+  // socket is destroyed, which routes through the existing close/reconnect
+  // path (see `handleClose` / `tryReconnect`).
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat()
+    const intervalMs = this.keepAliveCfg?.intervalMs ?? 30_000
+    const timeoutMs = this.keepAliveCfg?.timeoutMs ?? 60_000
+    this.lastPongMs = Date.now()
+    this.heartbeatTimer = setInterval(() => {
+      if (Date.now() - this.lastPongMs > timeoutMs) {
+        this.log.warn({ timeoutMs }, 'heartbeat timeout, dropping connection')
+        this.socket.destroy()
+        return
+      }
+      this.socket.write(packPing(this.nextSeq()))
+    }, intervalMs)
+    this.heartbeatTimer.unref()
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = undefined
+    }
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   close(): Promise<void> {
     this.closing = true
+    this.stopHeartbeat()
     this.socket.write(packDisconnect(this.nextSeq()))
     return new Promise((resolve) => this.socket.end(resolve))
   }
@@ -378,6 +426,7 @@ export class Connection {
 
   private handleClose(): void {
     this.log.debug('arbitro connection closed')
+    this.stopHeartbeat()
     this.drain(new ArbitroError('connection closed', 'closed'))
     const cfg = this.reconnectCfg
     if (!this.closing && cfg && cfg.enabled !== false && this.reconnectAddr) {
@@ -399,16 +448,15 @@ export class Connection {
     this.log.debug({ attempt, delayMs: Math.round(delay) }, 'reconnecting')
     setTimeout(() => {
       const { host, port } = this.reconnectAddr!
-      const socket = net.createConnection({ host, port })
-      socket.once('connect', () => {
+      Connection.dial(host, port, this.tlsCfg).then((socket) => {
         this.log.info({ host, port, attempt }, 'arbitro reconnected')
         this.framer = new Framer()
         this.socket = socket
         this.attachSocket(socket)
+        this.startHeartbeat()
         this.resubscribeAll()
         if (this.metrics) this.metrics.reconnects++
-      })
-      socket.once('error', () => this.tryReconnect(attempt + 1))
+      }).catch(() => this.tryReconnect(attempt + 1))
     }, delay)
   }
 }

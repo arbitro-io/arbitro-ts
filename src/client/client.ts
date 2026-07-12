@@ -28,7 +28,7 @@ import { ServiceBuilder } from '../service'
 
 type MsgCallback = (msg: Message) => void
 
-const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger'>> = {
+const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger' | 'keepAlive'>> = {
   servers: ['127.0.0.1:9898'],
   prefix: '',
   timeout: 5_000,
@@ -40,6 +40,7 @@ export class ArbitroClient {
   private readonly cfg: typeof DEFAULT_CONFIG
   private readonly tls: ClientConfig['tls']
   private readonly logger: ClientConfig['logger']
+  private readonly keepAlive: ClientConfig['keepAlive']
   private readonly sidCache = new Map<string, number>()
   private readonly _metrics = new ClientMetrics()
   private readonly _cronState = new CronState()
@@ -48,13 +49,14 @@ export class ArbitroClient {
     this.cfg = { ...DEFAULT_CONFIG, ...config }
     this.tls = config.tls
     this.logger = config.logger
+    this.keepAlive = config.keepAlive
   }
 
   async connect(): Promise<this> {
     const addr = this.cfg.servers[0]
     if (!addr) throw new ArbitroError('no servers configured', 'connect')
     this.conn = await Connection.connect(
-      addr, this.cfg.timeout, this.tls, this.cfg.reconnect, this.logger,
+      addr, this.cfg.timeout, this.tls, this.cfg.reconnect, this.logger, this.keepAlive,
     )
     this.conn.setMetrics(this._metrics)
     this.conn.setCronState(this._cronState)
