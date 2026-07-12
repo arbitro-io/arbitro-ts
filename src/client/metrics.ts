@@ -19,6 +19,12 @@ export interface ClientMetricsSnapshot {
   reconnects:           number
   /** Outstanding pending request-reply slots (gauge). */
   pendingReplies:       number
+  /** Acks deferred to the `AckRelay` hot tier (write failed / not connected). */
+  acksDeferred:         number
+  /** Deferred acks the broker has since confirmed (cursor/seq reconciliation). */
+  acksConfirmed:        number
+  /** Deferred acks dropped as expired (fell below the broker's retention window). */
+  acksExpired:          number
 }
 
 /**
@@ -38,6 +44,9 @@ export class ClientMetrics {
   nacksSent            = 0
   reconnects           = 0
   pendingReplies       = 0
+  acksDeferred         = 0
+  acksConfirmed        = 0
+  acksExpired          = 0
 
   snapshot(): ClientMetricsSnapshot {
     return {
@@ -49,6 +58,9 @@ export class ClientMetrics {
       nacksSent:           this.nacksSent,
       reconnects:          this.reconnects,
       pendingReplies:      this.pendingReplies,
+      acksDeferred:        this.acksDeferred,
+      acksConfirmed:       this.acksConfirmed,
+      acksExpired:         this.acksExpired,
     }
   }
 }

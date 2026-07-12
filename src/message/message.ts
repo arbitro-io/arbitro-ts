@@ -22,7 +22,9 @@ const OFF_REPLY_LEN   = BODY_OFF + 10
 
 export const REPLY_TO_MAGIC = 0xFF
 
-export type SendFn = (frame: Buffer) => void
+/** Returns `true` if the frame was handed off to the socket, `false` if
+ * the write failed or the socket wasn't connected/writable. */
+export type SendFn = (frame: Buffer) => boolean
 
 export class Message {
   private readonly frame: Buffer
@@ -30,18 +32,21 @@ export class Message {
   private readonly seqFn: () => bigint
   private readonly onAck: (() => void) | undefined
   private readonly onNack: (() => void) | undefined
+  private readonly onAckSendFailure: ((consumerId: number, seq: bigint) => void) | undefined
   private _subjectLen: number | undefined
   private _replyToLen: number | undefined
 
   constructor(
     frame: Buffer, send: SendFn, seqFn: () => bigint,
     onAck?: () => void, onNack?: () => void,
+    onAckSendFailure?: (consumerId: number, seq: bigint) => void,
   ) {
     this.frame = frame
     this.send  = send
     this.seqFn = seqFn
     this.onAck = onAck
     this.onNack = onNack
+    this.onAckSendFailure = onAckSendFailure
   }
 
   /** Delivery sequence — used to ack/nack this message. */
@@ -94,12 +99,20 @@ export class Message {
     this.send(packPublish(this.seqFn(), targetStreamId, replySubject, payload, Flag.AckReq, 0))
   }
 
-  /** Acknowledge — fire-and-forget to broker. */
+  /** Acknowledge — fire-and-forget to broker. If the write fails (socket
+   * down / not connected), the ack is handed to the `AckRelay` hot tier
+   * via `onAckSendFailure` instead of being silently lost — it's resent
+   * by the connection's sweep loop / reconnect replay once the socket
+   * recovers. */
   ack(): void {
-    this.send(packAck(
+    const ok = this.send(packAck(
       this.seqFn(), this.consumerId(), this.subjectHash(), this.seq(),
     ))
-    this.onAck?.()
+    if (ok) {
+      this.onAck?.()
+    } else {
+      this.onAckSendFailure?.(this.consumerId(), this.seq())
+    }
   }
 
   /** Negative acknowledge — immediate requeue. */

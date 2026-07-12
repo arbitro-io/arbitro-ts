@@ -13,9 +13,10 @@ import type { ClientMetrics } from '../client/metrics'
 import { CronState } from '../cron/cron-state'
 import { decodeCronFire, packCronAck, packCreateCron } from '../cron/cron-frame'
 import {
-  unpackAckStateRep, unpackAckBatchResp,
+  unpackAckStateRep, unpackAckBatchResp, packAckStateReq, packAckBatch,
   type AckStateRepBody, type AckBatchRespBody,
 } from '../proto/ackrel'
+import { AckRelay } from '../ackrel'
 
 type DeliveryHandler = (frame: Buffer) => void
 
@@ -52,8 +53,13 @@ export class Connection {
   private cronState?: CronState
   private heartbeatTimer?: ReturnType<typeof setInterval> | undefined
   private lastPongMs = 0
+  private ackSweepTimer?: ReturnType<typeof setInterval> | undefined
 
-  /** Wave 4 (ackrel layer) wires these; Wave 3 only parses + dispatches. */
+  /** Ack-reliability hot tier — pending state, generation, reconciliation. */
+  readonly ackRelay = new AckRelay()
+
+  /** Wired to the ackRelay by default (see below); tests/callers may
+   * override to observe raw AckStateRep/AckBatchResp frames instead. */
   onAckStateRep?: (body: AckStateRepBody) => void
   onAckBatchResp?: (body: AckBatchRespBody) => void
 
@@ -67,7 +73,10 @@ export class Connection {
   ) {
     this.log = resolveLogger(logger)
     this.socket = socket
+    this.onAckStateRep = (body) => this.ackRelay.applyAckStateRep(body.consumerId, body.cursor, body.lowSeq)
+    this.onAckBatchResp = (body) => this.ackRelay.applyAckBatchResp(body.consumerId, body.newCursor, body.belowRetention)
     this.attachSocket(socket)
+    this.startAckSweep()
   }
 
   private attachSocket(socket: net.Socket): void {
@@ -136,7 +145,7 @@ export class Connection {
    * The connection bumps `deliveriesReceived` on every Deliver/RepBatch
    * entry and `reconnects` on successful reconnections. Unset = no-op.
    */
-  setMetrics(m: ClientMetrics): void { this.metrics = m }
+  setMetrics(m: ClientMetrics): void { this.metrics = m; this.ackRelay.setMetrics(m) }
 
   /** Attach cron state so the connection can dispatch CronFire frames. */
   setCronState(s: CronState): void { this.cronState = s }
@@ -366,8 +375,18 @@ export class Connection {
 
   // ── Write ─────────────────────────────────────────────────────────────────
 
-  send(frame: Buffer): void {
-    this.socket.write(frame)
+  /** Returns `true` if the frame was handed off to the socket, `false` if
+   * the socket isn't connected/writable or the write threw. Callers on
+   * the ack path (see `Message.ack`) use this to fall back to the
+   * `AckRelay` hot tier instead of silently losing the ack. */
+  send(frame: Buffer): boolean {
+    if (!this.socket.writable || this.socket.destroyed) return false
+    try {
+      this.socket.write(frame)
+      return true
+    } catch {
+      return false
+    }
   }
 
   /** Send frame and wait for RepOk. Returns the ref_seq from body. */
@@ -434,11 +453,48 @@ export class Connection {
     }
   }
 
+  // ── Ack-reliability sweep loop ─────────────────────────────────────────────
+  // Mirrors consume/mod.rs's periodic re-flush: every 100ms, any consumer
+  // with a non-empty AckRelay pending set gets its seqs resent as an
+  // AckBatch. Confirmed entries are trimmed by `onAckBatchResp` (wired in
+  // the constructor); anything still outstanding just gets resent next tick.
+
+  private startAckSweep(): void {
+    this.ackSweepTimer = setInterval(() => {
+      for (const consumerId of this.ackRelay.consumerIds()) {
+        const seqs = this.ackRelay.pendingSeqs(consumerId)
+        if (seqs.length === 0) continue
+        const generation = this.ackRelay.generationOf(consumerId)
+        this.send(packAckBatch(this.nextSeq(), consumerId, generation, 0, seqs))
+      }
+    }, 100)
+    this.ackSweepTimer.unref()
+  }
+
+  private stopAckSweep(): void {
+    if (this.ackSweepTimer) {
+      clearInterval(this.ackSweepTimer)
+      this.ackSweepTimer = undefined
+    }
+  }
+
+  /** On every successful reconnect: bump each tracked consumer's
+   * generation and ask the broker for its authoritative ack cursor —
+   * mirrors `send_ack_state_reqs` at `conn/session.rs:190`. */
+  private replayAckState(): void {
+    for (const consumerId of this.ackRelay.consumerIds()) {
+      this.ackRelay.bumpGeneration(consumerId)
+      const generation = this.ackRelay.generationOf(consumerId)
+      this.send(packAckStateReq(this.nextSeq(), consumerId, generation))
+    }
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   close(): Promise<void> {
     this.closing = true
     this.stopHeartbeat()
+    this.stopAckSweep()
     this.socket.write(packDisconnect(this.nextSeq()))
     return new Promise((resolve) => this.socket.end(resolve))
   }
@@ -479,6 +535,7 @@ export class Connection {
         this.attachSocket(socket)
         this.startHeartbeat()
         this.resubscribeAll()
+        this.replayAckState()
         if (this.metrics) this.metrics.reconnects++
       }).catch(() => this.tryReconnect(attempt + 1))
     }, delay)

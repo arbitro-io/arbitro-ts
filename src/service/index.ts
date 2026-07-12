@@ -273,7 +273,11 @@ export class ServiceBuilder {
     const replyConsumerId = Number(replyRef & 0xFFFFFFFFn)
 
     const handler = (frame: Buffer) => {
-      const msg = new Message(frame, (f) => this.conn.send(f), () => this.conn.nextSeq())
+      const msg = new Message(
+        frame, (f) => this.conn.send(f), () => this.conn.nextSeq(),
+        undefined, undefined,
+        (consumerId, seq) => this.conn.ackRelay.record(consumerId, seq),
+      )
       svc._dispatch(msg)
     }
 
