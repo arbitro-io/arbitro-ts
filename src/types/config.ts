@@ -1,10 +1,11 @@
-// Values must match Rust enum variant names (rmp_serde serializes as PascalCase)
+// Values must match Rust enum variant names (rmp_serde serializes as PascalCase).
+// The broker's wire encoding only accepts All=0, New=1, ByStartSeq=2 — there
+// is no `Last` or `ByStartTime` variant server-side, so those are not
+// exposed here (see arbitro-client-tokio/src/consumer_builder.rs DeliverPolicy).
 export enum DeliverPolicy {
-  All    = 'All',
-  Last   = 'Last',
-  New    = 'New',
-  BySeq  = 'ByStartSeq',
-  ByTime = 'ByStartTime',
+  All   = 'All',
+  New   = 'New',
+  BySeq = 'ByStartSeq',
 }
 
 export enum JournalType {
@@ -57,7 +58,22 @@ export interface DeleteStreamOpts {
 
 export interface StreamInfo {
   name: string
+  /**
+   * `config` is NOT parsed from a broker-side info body — the broker's
+   * `GetStream`/`ListStreams` replies only carry the stream's `wire_id`
+   * (and, for `ListStreams`, the name). There is no wire message that
+   * returns the full `StreamConfig` back from the server today, so this
+   * field is always a placeholder (`{ subjectFilter: '' }`). Do not rely
+   * on it reflecting the stream's real configuration.
+   */
   config: StreamConfig
+  /**
+   * Server-assigned wire id (`wire_hash_32`) for this stream. This is
+   * NOT a sequence number — the field used to be misnamed `lastSeq`.
+   */
+  wireId: bigint
+  /** @deprecated Misnamed alias for {@link wireId}, kept for source
+   * compatibility. Prefer `wireId`. Will be removed in a future major. */
   lastSeq: number
 }
 
@@ -98,9 +114,23 @@ export interface ConsumerConfig {
 }
 
 export interface ConsumerInfo {
+  /**
+   * `group`/`stream`/`config` are NOT parsed from a real info body — the
+   * broker's `ListConsumers` reply only carries numeric ids
+   * (`consumer_id`, `stream_id`, `queue_id`, `paused`), no names and no
+   * `ConsumerConfig`. These three fields are placeholders derived from
+   * `wireId` for source compatibility; do not treat them as the
+   * consumer's actual group/stream name or config.
+   */
   group: string
   stream: string
   config: ConsumerConfig
+  /** Server-assigned consumer id (`wire_id`) from the `ListConsumers` reply. */
+  wireId: bigint
+  /** Server-assigned stream id this consumer is bound to. */
+  streamWireId: bigint
+  /** Whether delivery to this consumer is currently paused. */
+  paused: boolean
 }
 
 export interface SubscribeOptions {

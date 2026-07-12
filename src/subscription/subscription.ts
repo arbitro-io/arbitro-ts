@@ -34,6 +34,8 @@ export class Subscription {
       frame,
       (f) => this.conn.send(f),
       () => this.conn.nextSeq(),
+      () => this.conn.bumpAcksSent(),
+      () => this.conn.bumpNacksSent(),
     )
 
     if (this.callback) {

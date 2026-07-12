@@ -1,10 +1,12 @@
 import { Connection } from '../net/connection'
 import { Subscription } from '../subscription/subscription'
-import { ArbitroError } from '../types/error'
+import { ArbitroError, ErrorCode } from '../types/error'
 import { Stream } from '../stream/stream'
 import { Consumer } from '../consumer/consumer'
 import { ClientMetrics, type ClientMetricsSnapshot } from './metrics'
-import { streamPublish, streamPublishAck, streamPublishBatch, streamRequest } from '../stream/publish'
+import {
+  streamPublish, streamPublishAck, streamPublishBatch, streamRequest, streamPublishWithReply,
+} from '../stream/publish'
 import {
   packPublish, packCreateStream, packDeleteStream, packGetStream,
   packPurgeStream, packDrainSubject, packDeleteMessage, packListStreams,
@@ -64,7 +66,12 @@ export class ArbitroClient {
    * received, acks/nacks, active subscriptions, reconnects. Cheap — just
    * reads plain integer fields. Call on a timer to chart throughput.
    */
-  metrics(): ClientMetricsSnapshot { return this._metrics.snapshot() }
+  metrics(): ClientMetricsSnapshot {
+    // pendingReplies is a live gauge — read straight off the connection's
+    // pending-request map rather than a manually incremented counter.
+    this._metrics.pendingReplies = this.conn.pendingCount()
+    return this._metrics.snapshot()
+  }
 
   /** Internal connection accessor for Stream/Consumer publish methods. */
   _conn(): Connection { return this.conn }
@@ -148,9 +155,32 @@ export class ArbitroClient {
   }
 
   /** Request-reply. */
-  async request(streamName: string, subject: string, data: Buffer, timeoutMs = this.cfg.timeout): Promise<Buffer> {
+  async request(
+    streamName: string, subject: string, data: Buffer, timeoutMs = this.cfg.timeout,
+    msgId?: Buffer,
+  ): Promise<Buffer> {
     const sid = await this.resolveStreamId(streamName)
-    return streamRequest(this.conn, sid, subject, data, timeoutMs)
+    return streamRequest(this.conn, sid, subject, data, timeoutMs, msgId)
+  }
+
+  /**
+   * Publish a message carrying an explicit `reply_to` subject (RPC
+   * pattern). The broker stores the entry with the `reply_to` metadata;
+   * consumers see it via `msg.replyTo()` / `msg.reply()` and can publish
+   * a response there. The caller is responsible for subscribing to
+   * `replyTo` before calling this. Resolves once the broker confirms
+   * receipt (`RepOk`) — same "await or don't" contract as `publish`.
+   *
+   * `opts.msgId` opts this publish into the target stream's dedup
+   * window, same semantics as `publish`'s `msgId`.
+   */
+  async publishWithReply(
+    streamName: string, subject: string, replyTo: string, data: Buffer,
+    opts?: import('../stream/publish').PublishOpts,
+  ): Promise<void> {
+    const sid = await this.resolveStreamId(streamName)
+    await streamPublishWithReply(this.conn, sid, this.prefixed(subject), replyTo, data, opts)
+    this._metrics.publishesSent++
   }
 
   /**
@@ -240,7 +270,7 @@ export class ArbitroClient {
     try {
       return await this.createStream(name, config)
     } catch (e: any) {
-      if (e?.message?.includes('code=')) {
+      if (e instanceof ArbitroError && e.wireCode === ErrorCode.StreamAlreadyExists) {
         await this.resolveStreamId(name)
         return new Stream(this, name, config)
       }
@@ -261,7 +291,10 @@ export class ArbitroClient {
         packGetStream(this.conn.nextSeq(), Buffer.from(name)),
       )
       this.sidCache.set(name, Number(refSeq & 0xFFFFFFFFn))
-      return { name, config: { subjectFilter: '' }, lastSeq: Number(refSeq) }
+      // `config` is a placeholder — GetStream's RepOk only carries the
+      // wire_id (ref_seq), never the stream's real config. See StreamInfo
+      // JSDoc.
+      return { name, config: { subjectFilter: '' }, wireId: refSeq, lastSeq: Number(refSeq) }
     } catch {
       return null
     }
@@ -314,6 +347,7 @@ export class ArbitroClient {
   }
 
   private async createConsumerRaw(streamName: string, config: ConsumerConfig): Promise<number> {
+    validateConsumerConfig(config)
     const sid = await this.resolveStreamId(streamName)
     const name = Buffer.from(config.name ?? streamName)
     const group = Buffer.from(config.group ?? config.name ?? streamName)
@@ -352,7 +386,8 @@ export class ArbitroClient {
     try {
       return await this.createConsumer(streamName, config)
     } catch (e: any) {
-      // If already exists, get its ID
+      if (!(e instanceof ArbitroError) || e.wireCode !== ErrorCode.ConsumerAlreadyExists) throw e
+      // Already exists — look up its server-assigned ID.
       const consumerId = await this.getConsumerId(streamName, config.name ?? streamName)
       if (consumerId !== null) return new Consumer(this, streamName, config, consumerId)
       throw e
@@ -420,7 +455,12 @@ export class ArbitroClient {
   async getConsumerInfo(streamName: string, name: string): Promise<ConsumerInfo | null> {
     const id = await this.getConsumerId(streamName, name)
     if (id === null) return null
-    return { group: name, stream: streamName, config: { name } }
+    // GetConsumer's RepOk only carries the wire id — no config comes back
+    // from the broker, so `config` is a name-only placeholder.
+    return {
+      group: name, stream: streamName, config: { name },
+      wireId: BigInt(id), streamWireId: 0n, paused: false,
+    }
   }
 
   async listConsumers(streamName?: string): Promise<ConsumerInfo[]> {
@@ -498,8 +538,14 @@ export class ArbitroClient {
 
 // ── Reply parsers ──────────────────────────────────────────────────────────
 
+/**
+ * Header(16) + count(4) + entries[wire_id(4) + name_len(2) + name].
+ *
+ * The broker's `ListStreams` reply carries only the wire id and name —
+ * no config — so `config` is always the `{ subjectFilter: '' }`
+ * placeholder documented on `StreamInfo`.
+ */
 function parseListStreamsReply(frame: Buffer): StreamInfo[] {
-  // Header(16) + count(4) + entries[wire_id(4) + name_len(2) + name]
   if (frame.length < HEADER_SIZE + 4) return []
   const count = frame.readUInt32LE(HEADER_SIZE)
   const results: StreamInfo[] = []
@@ -511,13 +557,22 @@ function parseListStreamsReply(frame: Buffer): StreamInfo[] {
     off += 6
     const name = frame.subarray(off, off + nameLen).toString()
     off += nameLen
-    results.push({ name, config: { subjectFilter: '' }, lastSeq: wireId })
+    results.push({ name, config: { subjectFilter: '' }, wireId: BigInt(wireId), lastSeq: wireId })
   }
   return results
 }
 
+/**
+ * Header(16) + count(4) + entries[consumer_id(4) + stream_id(4) +
+ * queue_id(4) + paused(1)].
+ *
+ * The broker's `ListConsumers` reply carries only numeric ids and the
+ * paused flag — no names, no `ConsumerConfig`. `group`/`stream`/`config`
+ * below are source-compat placeholders derived from the numeric ids; use
+ * `wireId`/`streamWireId`/`paused` for the real data. See `ConsumerInfo`
+ * JSDoc.
+ */
 function parseListConsumersReply(frame: Buffer): ConsumerInfo[] {
-  // Header(16) + count(4) + entries[consumer_id(4) + stream_id(4) + queue_id(4) + paused(1)]
   if (frame.length < HEADER_SIZE + 4) return []
   const count = frame.readUInt32LE(HEADER_SIZE)
   const results: ConsumerInfo[] = []
@@ -525,14 +580,17 @@ function parseListConsumersReply(frame: Buffer): ConsumerInfo[] {
   for (let i = 0; i < count; i++) {
     if (off + 13 > frame.length) break
     const consumerId = frame.readUInt32LE(off)
-    const _streamId = frame.readUInt32LE(off + 4)
+    const streamId = frame.readUInt32LE(off + 4)
     const _queueId = frame.readUInt32LE(off + 8)
-    const _paused = frame[off + 12]
+    const paused = frame[off + 12] !== 0
     off += 13
     results.push({
       group: consumerId.toString(),
       stream: '',
       config: { name: consumerId.toString() },
+      wireId: BigInt(consumerId),
+      streamWireId: BigInt(streamId),
+      paused,
     })
   }
   return results
@@ -543,8 +601,55 @@ function deliverPolicyToU8(policy?: DeliverPolicy): number {
     case DeliverPolicy.All: return 0
     case DeliverPolicy.New: return 1
     case DeliverPolicy.BySeq: return 2
-    case DeliverPolicy.ByTime: return 3
     default: return 0
+  }
+}
+
+/**
+ * Mirrors the five invariant checks in
+ * `arbitro-client-tokio/src/consumer_builder.rs::validate` (lines
+ * 148-223) so the TS client rejects invalid configs client-side instead
+ * of round-tripping to the broker.
+ *
+ * One deliberate deviation from the Rust builder: Rust's `ack_policy`
+ * has no default and errors when unset, because its builder API always
+ * requires an explicit `.ack_policy(...)` call. The TS `ConsumerConfig`
+ * has historically treated an omitted `ackPolicy` as `Explicit` (see
+ * `createConsumerRaw`'s `ackPolicyByte` mapping) — changing that default
+ * would silently break every existing caller that relies on it. This
+ * validator therefore resolves the *effective* ack policy the same way
+ * `createConsumerRaw` does before checking the remaining invariants,
+ * rather than throwing on a merely-omitted `ackPolicy`.
+ */
+function validateConsumerConfig(config: ConsumerConfig): void {
+  const ackPolicy = config.ackPolicy ?? AckPolicy.Explicit
+
+  if (ackPolicy === AckPolicy.None) {
+    if (config.maxAckPending) {
+      throw new ArbitroError(
+        'maxAckPending requires AckPolicy.Explicit (fire-and-forget consumers don\'t track inflight)',
+        'protocol',
+      )
+    }
+    if (config.maxSubjectInflights?.length) {
+      throw new ArbitroError(
+        'maxSubjectInflights requires AckPolicy.Explicit (fire-and-forget consumers don\'t track inflight)',
+        'protocol',
+      )
+    }
+    if (config.ackWaitMs) {
+      throw new ArbitroError(
+        'ackWaitMs requires AckPolicy.Explicit',
+        'protocol',
+      )
+    }
+  }
+
+  if (config.deliverPolicy === DeliverPolicy.BySeq && !(config.startSeq && config.startSeq > 0n)) {
+    throw new ArbitroError(
+      'DeliverPolicy.BySeq requires startSeq > 0',
+      'protocol',
+    )
   }
 }
 

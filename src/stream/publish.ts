@@ -6,6 +6,10 @@ import { encodeExtendedPayload, extractMsgId, type HeaderMap } from '../proto/he
 
 const EMPTY = Buffer.alloc(0)
 
+// Mirrors PUBLISH_BATCH_MAX in arbitro-client-tokio/src/publish/mod.rs —
+// the broker's wire limit for a single PublishBatch frame's entry count.
+const PUBLISH_BATCH_MAX = 256
+
 /**
  * Optional per-publish options.
  *
@@ -90,28 +94,68 @@ export async function streamPublishAck(
  *
  *  This mirrors the design of `publish` / `publishAck`: the function
  *  always speaks the full request/response to the broker; await is the
- *  caller's contract decision, not the API's. */
+ *  caller's contract decision, not the API's.
+ *
+ *  Entries beyond `PUBLISH_BATCH_MAX` (256) are split into multiple
+ *  `PublishBatch` frames — mirrors `publish_batch_async`'s
+ *  `entries.chunks(PUBLISH_BATCH_MAX)` in `publish/mod.rs`. Only the
+ *  first chunk's `RepOk` is awaited (its `first_seq` is what the caller
+ *  needs — the remaining N-1 messages occupy the following contiguous
+ *  sequences); the rest are sent fire-and-forget so a single oversized
+ *  batch still costs one logical round-trip from the caller's view. */
 export async function streamPublishBatch(
   conn: Connection, sid: number, messages: BatchPublishEntry[],
 ): Promise<bigint> {
-  // `sendExpectReply` decodes the RepOk body (u64 LE) which the broker
-  // fills with `first_seq` for PublishBatch.
-  return await conn.sendExpectReply(
-    packPublishBatch(conn.nextSeq(), sid, messages),
+  if (messages.length <= PUBLISH_BATCH_MAX) {
+    // `sendExpectReply` decodes the RepOk body (u64 LE) which the broker
+    // fills with `first_seq` for PublishBatch.
+    return await conn.sendExpectReply(
+      packPublishBatch(conn.nextSeq(), sid, messages),
+    )
+  }
+
+  const firstChunk = messages.slice(0, PUBLISH_BATCH_MAX)
+  const firstSeq = await conn.sendExpectReply(
+    packPublishBatch(conn.nextSeq(), sid, firstChunk),
   )
+  for (let off = PUBLISH_BATCH_MAX; off < messages.length; off += PUBLISH_BATCH_MAX) {
+    const chunk = messages.slice(off, off + PUBLISH_BATCH_MAX)
+    conn.send(packPublishBatch(conn.nextSeq(), sid, chunk))
+  }
+  return firstSeq
 }
 
 /** Request-reply through a stream. Uses V2 PublishWithReply. */
 export async function streamRequest(
   conn: Connection, sid: number, subject: string, data: Buffer, timeoutMs: number,
+  msgId?: Buffer,
 ): Promise<Buffer> {
   const subj = Buffer.from(subject)
   const replyTo = Buffer.from(`_INBOX.${conn.nextSeq().toString(36)}`)
   const frame = packPublishWithReply(
-    conn.nextSeq(), sid, subj, replyTo, data, Flag.AckReq,
+    conn.nextSeq(), sid, subj, replyTo, data, Flag.AckReq, 0, msgId ?? EMPTY,
   )
   await conn.sendExpectReply(frame, timeoutMs)
   // reply is ref_seq from RepOk — actual reply routing handled differently in V2.
   // For now, return empty buffer — request-reply semantics need server support.
   return Buffer.alloc(0)
+}
+
+/**
+ * Publish with a reply-to subject, awaiting only the broker's `RepOk`
+ * (no reply payload — see `streamRequest`'s note on V2 reply routing).
+ * `msgId` opts this publish into the target stream's dedup window, same
+ * as `streamPublishAck`. Mirrors the Rust client's
+ * `publish_with_reply` / `publish_with_reply_msg_id`.
+ */
+export async function streamPublishWithReply(
+  conn: Connection, sid: number, subject: string, replyTo: string, data: Buffer,
+  opts?: PublishOpts,
+): Promise<void> {
+  const subj = Buffer.from(subject)
+  const reply = Buffer.from(replyTo)
+  const { payload, entryFlags, msgId } = buildPayloadAndFlags(data, opts)
+  await conn.sendExpectReply(
+    packPublishWithReply(conn.nextSeq(), sid, subj, reply, payload, Flag.AckReq, entryFlags, msgId),
+  )
 }

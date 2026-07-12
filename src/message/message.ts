@@ -28,13 +28,20 @@ export class Message {
   private readonly frame: Buffer
   private readonly send:  SendFn
   private readonly seqFn: () => bigint
+  private readonly onAck: (() => void) | undefined
+  private readonly onNack: (() => void) | undefined
   private _subjectLen: number | undefined
   private _replyToLen: number | undefined
 
-  constructor(frame: Buffer, send: SendFn, seqFn: () => bigint) {
+  constructor(
+    frame: Buffer, send: SendFn, seqFn: () => bigint,
+    onAck?: () => void, onNack?: () => void,
+  ) {
     this.frame = frame
     this.send  = send
     this.seqFn = seqFn
+    this.onAck = onAck
+    this.onNack = onNack
   }
 
   /** Delivery sequence — used to ack/nack this message. */
@@ -92,6 +99,7 @@ export class Message {
     this.send(packAck(
       this.seqFn(), this.consumerId(), this.subjectHash(), this.seq(),
     ))
+    this.onAck?.()
   }
 
   /** Negative acknowledge — immediate requeue. */
@@ -99,6 +107,7 @@ export class Message {
     this.send(packNack(
       this.seqFn(), this.consumerId(), this.subjectHash(), this.seq(),
     ))
+    this.onNack?.()
   }
 
   /** Negative acknowledge with redelivery delay (ms). */
@@ -108,5 +117,6 @@ export class Message {
       this.seqFn(), this.consumerId(),
       [{ seq: this.seq(), subjectHash: this.subjectHash(), delayMs: ms }],
     ))
+    this.onNack?.()
   }
 }

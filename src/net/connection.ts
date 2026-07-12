@@ -118,6 +118,15 @@ export class Connection {
   /** Attach cron state so the connection can dispatch CronFire frames. */
   setCronState(s: CronState): void { this.cronState = s }
 
+  /** Live count of outstanding pending request-reply slots (gauge). */
+  pendingCount(): number { return this.pending.size }
+
+  /** Bump `acksSent` — called by `Message.ack()`. */
+  bumpAcksSent(): void { if (this.metrics) this.metrics.acksSent++ }
+
+  /** Bump `nacksSent` — called by `Message.nack()` / `nackDelay()`. */
+  bumpNacksSent(): void { if (this.metrics) this.metrics.nacksSent++ }
+
 
   // ── Frame routing ─────────────────────────────────────────────────────────
   // Seq-based dispatch: match reply.header.seq → pending request. O(1).
@@ -169,7 +178,8 @@ export class Connection {
         handler(frame)
         return
       }
-      case Action.RepBatch: {
+      case Action.RepBatch:
+      case Action.FanoutBatch: {
         this.handleBatchDeliver(frame)
         return
       }
@@ -396,6 +406,7 @@ export class Connection {
         this.socket = socket
         this.attachSocket(socket)
         this.resubscribeAll()
+        if (this.metrics) this.metrics.reconnects++
       })
       socket.once('error', () => this.tryReconnect(attempt + 1))
     }, delay)

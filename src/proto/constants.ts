@@ -65,9 +65,13 @@ export const enum Action {
   RepBatch     = 0x0205,
   BatchAck     = 0x0206,
   FanoutBatch  = 0x0207,
-  AckSync      = 0x0208,
-  BatchAckSync = 0x0209,
+  // 0x0208 (AckSync) / 0x0209 (BatchAckSync) removed — collapsed into
+  // fire-and-forget Ack/BatchAck server-side (arbitro-proto action.rs).
+  // Reserved; do not reuse the slots.
   BatchNack    = 0x020A,
+  /** Terminate delivery of a message — consumer permanently rejects it.
+   * Same wire shape as Ack. Broker tombstones the entry (never redelivered). */
+  AckTerm      = 0x020B,
 
   // 0x03xx — Subscription
   Subscribe   = 0x0301,
