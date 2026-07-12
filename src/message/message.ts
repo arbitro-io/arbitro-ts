@@ -33,6 +33,7 @@ export class Message {
   private readonly onAck: (() => void) | undefined
   private readonly onNack: (() => void) | undefined
   private readonly onAckSendFailure: ((consumerId: number, seq: bigint) => void) | undefined
+  private readonly enqueueAck: ((consumerId: number, subjectHash: number, seq: bigint) => void) | undefined
   private _subjectLen: number | undefined
   private _replyToLen: number | undefined
 
@@ -40,6 +41,7 @@ export class Message {
     frame: Buffer, send: SendFn, seqFn: () => bigint,
     onAck?: () => void, onNack?: () => void,
     onAckSendFailure?: (consumerId: number, seq: bigint) => void,
+    enqueueAck?: (consumerId: number, subjectHash: number, seq: bigint) => void,
   ) {
     this.frame = frame
     this.send  = send
@@ -47,6 +49,7 @@ export class Message {
     this.onAck = onAck
     this.onNack = onNack
     this.onAckSendFailure = onAckSendFailure
+    this.enqueueAck = enqueueAck
   }
 
   /** Delivery sequence — used to ack/nack this message. */
@@ -99,12 +102,27 @@ export class Message {
     this.send(packPublish(this.seqFn(), targetStreamId, replySubject, payload, Flag.AckReq, 0))
   }
 
-  /** Acknowledge — fire-and-forget to broker. If the write fails (socket
-   * down / not connected), the ack is handed to the `AckRelay` hot tier
-   * via `onAckSendFailure` instead of being silently lost — it's resent
-   * by the connection's sweep loop / reconnect replay once the socket
-   * recovers. */
+  /** Acknowledge — fire-and-forget to broker.
+   *
+   * When `enqueueAck` is wired (the normal path — see `Connection`), this
+   * queues the ack into the connection's per-tick batching accumulator:
+   * every ack fired synchronously in the same tick collapses into one
+   * `BatchAck` frame per consumer (single-frame fast path when only one).
+   * A batched send that fails still falls back to the `AckRelay` hot tier
+   * — see `Connection.flushAckAccumulator`.
+   *
+   * Without `enqueueAck` (e.g. a bare `Message` built without a
+   * `Connection`), falls back to a single inline `Ack` frame; if that
+   * write fails (socket down / not connected), the ack is handed to the
+   * `AckRelay` hot tier via `onAckSendFailure` instead of being silently
+   * lost — it's resent by the connection's sweep loop / reconnect replay
+   * once the socket recovers. */
   ack(): void {
+    if (this.enqueueAck) {
+      this.enqueueAck(this.consumerId(), this.subjectHash(), this.seq())
+      this.onAck?.()
+      return
+    }
     const ok = this.send(packAck(
       this.seqFn(), this.consumerId(), this.subjectHash(), this.seq(),
     ))

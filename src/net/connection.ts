@@ -1,7 +1,10 @@
 import * as net from 'net'
 import * as tls from 'tls'
 import { Framer } from '../proto/framer'
-import { packHello, packSubscribe, packUnsubscribe, packDisconnect, packPing } from '../proto/v2'
+import {
+  packHello, packSubscribe, packUnsubscribe, packDisconnect, packPing,
+  packAck, packBatchAck,
+} from '../proto/v2'
 import {
   Action, HEADER_SIZE, OFF_ACTION, OFF_SEQ, OFF_MSG_LEN,
 } from '../proto/constants'
@@ -57,6 +60,16 @@ export class Connection {
 
   /** Ack-reliability hot tier — pending state, generation, reconciliation. */
   readonly ackRelay = new AckRelay()
+
+  // ── Ack batching accumulator (Wave4b) ─────────────────────────────────────
+  // Collects Message.ack() calls for one microtask tick, grouped by
+  // consumer, then flushes as a single BatchAck frame per consumer
+  // (inline single-frame fast path when a consumer only had one ack this
+  // tick). Mirrors consume/mod.rs's dedicated batcher tasks, minus the
+  // channel — a JS microtask boundary plays the same role as "drain up to
+  // 64 commands, group by consumer".
+  private ackAccumulator = new Map<number, Array<{ seq: bigint; subjectHash: number }>>()
+  private ackFlushScheduled = false
 
   /** Wired to the ackRelay by default (see below); tests/callers may
    * override to observe raw AckStateRep/AckBatchResp frames instead. */
@@ -158,6 +171,41 @@ export class Connection {
 
   /** Bump `nacksSent` — called by `Message.nack()` / `nackDelay()`. */
   bumpNacksSent(): void { if (this.metrics) this.metrics.nacksSent++ }
+
+  // ── Ack batching ─────────────────────────────────────────────────────────
+
+  /** Queue one ack for `consumerId`/`seq`. Called by `Message.ack()`
+   * instead of building+sending an `Ack` frame directly. Flushes on the
+   * next microtask so every ack fired synchronously within the same tick
+   * (e.g. a loop over a batch delivery) collapses into a single frame. */
+  enqueueAck(consumerId: number, subjectHash: number, seq: bigint): void {
+    let list = this.ackAccumulator.get(consumerId)
+    if (!list) { list = []; this.ackAccumulator.set(consumerId, list) }
+    list.push({ seq, subjectHash })
+    if (!this.ackFlushScheduled) {
+      this.ackFlushScheduled = true
+      queueMicrotask(() => this.flushAckAccumulator())
+    }
+  }
+
+  private flushAckAccumulator(): void {
+    this.ackFlushScheduled = false
+    const batches = this.ackAccumulator
+    this.ackAccumulator = new Map()
+
+    for (const [consumerId, entries] of batches) {
+      const ok = entries.length === 1
+        ? this.send(packAck(this.nextSeq(), consumerId, entries[0]!.subjectHash, entries[0]!.seq))
+        : this.send(packBatchAck(this.nextSeq(), consumerId, entries))
+
+      // Batched send failed (socket down / write threw) — defer every
+      // seq in this batch to the AckRelay hot tier instead of losing
+      // them; the sweep loop / reconnect replay resends them later.
+      if (!ok) {
+        for (const e of entries) this.ackRelay.record(consumerId, e.seq)
+      }
+    }
+  }
 
 
   // ── Frame routing ─────────────────────────────────────────────────────────

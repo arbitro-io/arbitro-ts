@@ -37,6 +37,7 @@ export class Subscription {
       () => this.conn.bumpAcksSent(),
       () => this.conn.bumpNacksSent(),
       (consumerId, seq) => this.conn.ackRelay.record(consumerId, seq),
+      (consumerId, subjectHash, seq) => this.conn.enqueueAck(consumerId, subjectHash, seq),
     )
 
     if (this.callback) {

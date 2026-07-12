@@ -277,6 +277,7 @@ export class ServiceBuilder {
         frame, (f) => this.conn.send(f), () => this.conn.nextSeq(),
         undefined, undefined,
         (consumerId, seq) => this.conn.ackRelay.record(consumerId, seq),
+        (consumerId, subjectHash, seq) => this.conn.enqueueAck(consumerId, subjectHash, seq),
       )
       svc._dispatch(msg)
     }
