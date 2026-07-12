@@ -13,3 +13,8 @@ export {
   packDeleteConsumer, packGetConsumer, packListConsumers,
   packConsumerStats, packPauseConsumer, packResumeConsumer,
 } from './manage'
+export {
+  packAckStateReq, packAckBatch,
+  type AckStateRepBody, unpackAckStateRep,
+  type AckBatchRespBody, unpackAckBatchResp,
+} from './ackrel'

@@ -12,6 +12,10 @@ import type { Logger } from '../common/logger'
 import type { ClientMetrics } from '../client/metrics'
 import { CronState } from '../cron/cron-state'
 import { decodeCronFire, packCronAck, packCreateCron } from '../cron/cron-frame'
+import {
+  unpackAckStateRep, unpackAckBatchResp,
+  type AckStateRepBody, type AckBatchRespBody,
+} from '../proto/ackrel'
 
 type DeliveryHandler = (frame: Buffer) => void
 
@@ -48,6 +52,10 @@ export class Connection {
   private cronState?: CronState
   private heartbeatTimer?: ReturnType<typeof setInterval> | undefined
   private lastPongMs = 0
+
+  /** Wave 4 (ackrel layer) wires these; Wave 3 only parses + dispatches. */
+  onAckStateRep?: (body: AckStateRepBody) => void
+  onAckBatchResp?: (body: AckBatchRespBody) => void
 
   private constructor(
     socket: net.Socket,
@@ -204,6 +212,22 @@ export class Connection {
       }
       case Action.Pong: {
         this.lastPongMs = Date.now()
+        return
+      }
+      case Action.AckStateRep: {
+        if (!this.onAckStateRep) {
+          this.log.debug('AckStateRep received with no handler, dropped')
+          return
+        }
+        this.onAckStateRep(unpackAckStateRep(frame.subarray(HEADER_SIZE)))
+        return
+      }
+      case Action.AckBatchResp: {
+        if (!this.onAckBatchResp) {
+          this.log.debug('AckBatchResp received with no handler, dropped')
+          return
+        }
+        this.onAckBatchResp(unpackAckBatchResp(frame.subarray(HEADER_SIZE)))
         return
       }
       default: {

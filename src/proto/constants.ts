@@ -113,4 +113,10 @@ export const enum Action {
   CronAck    = 0x0705,
 
   // 0x09xx reserved (workflow removed — now a client-side library).
+
+  // 0x0Axx — Ack reliability
+  AckStateReq  = 0x0A01,
+  AckStateRep  = 0x0A02,
+  AckBatch     = 0x0A03,
+  AckBatchResp = 0x0A04,
 }
