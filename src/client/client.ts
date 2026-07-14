@@ -5,8 +5,9 @@ import { Stream } from '../stream/stream'
 import { Consumer } from '../consumer/consumer'
 import { ClientMetrics, type ClientMetricsSnapshot } from './metrics'
 import {
-  streamPublish, streamPublishAck, streamPublishBatch, streamRequest, streamPublishWithReply,
+  streamPublish, streamPublishAck, streamPublishBatch, streamPublishWithReply,
 } from '../stream/publish'
+import { RequestReplyManager } from './request'
 import {
   packPublish, packCreateStream, packDeleteStream, packGetStream,
   packPurgeStream, packDrainSubject, packDeleteMessage, packListStreams,
@@ -28,11 +29,18 @@ import { ServiceBuilder } from '../service'
 
 type MsgCallback = (msg: Message) => void
 
+/** Default `client.request()` timeout. Matches the Rust client's
+ * request-reply default (see `service.rs`) — independent of the generic
+ * `ClientConfig.timeout` used by management calls (create/get/list/...). */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+
 const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger' | 'keepAlive'>> = {
   servers: ['127.0.0.1:9898'],
   prefix: '',
   timeout: 5_000,
-  reconnect: { enabled: true, maxAttempts: 10, intervalMs: 500, jitter: true },
+  // G15: matches Rust ReconnectPolicy::max_attempts default of None (infinite).
+  // Users who want a hard cap can override maxAttempts explicitly.
+  reconnect: { enabled: true, maxAttempts: Infinity, intervalMs: 500, jitter: true },
 }
 
 export class ArbitroClient {
@@ -44,6 +52,7 @@ export class ArbitroClient {
   private readonly sidCache = new Map<string, number>()
   private readonly _metrics = new ClientMetrics()
   private readonly _cronState = new CronState()
+  private _requestManager?: RequestReplyManager
 
   constructor(config: ClientConfig) {
     this.cfg = { ...DEFAULT_CONFIG, ...config }
@@ -60,6 +69,7 @@ export class ArbitroClient {
     )
     this.conn.setMetrics(this._metrics)
     this.conn.setCronState(this._cronState)
+    this._requestManager = new RequestReplyManager(this.conn)
     return this
   }
 
@@ -156,13 +166,31 @@ export class ArbitroClient {
     return streamPublishBatch(this.conn, sid, prefixedMsgs)
   }
 
-  /** Request-reply. */
+  /**
+   * Request-reply: publishes `subject` on `streamName` with an encoded
+   * reply-to, and resolves with the responder's reply payload once it
+   * arrives. Requires a subscriber on `streamName` that calls
+   * `msg.reply(payload)` (or `Request`/`Service`-style handling).
+   *
+   * A private per-instance reply consumer is created lazily on
+   * `streamName` the first time `request()` targets it — see
+   * `RequestReplyManager`. `timeoutMs` defaults to 30s; on timeout the
+   * correlation entry is removed and the promise rejects with a typed
+   * `ArbitroError('request timeout', 'timeout')`.
+   */
   async request(
-    streamName: string, subject: string, data: Buffer, timeoutMs = this.cfg.timeout,
+    streamName: string, subject: string, data: Buffer, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
     msgId?: Buffer,
   ): Promise<Buffer> {
     const sid = await this.resolveStreamId(streamName)
-    return streamRequest(this.conn, sid, subject, data, timeoutMs, msgId)
+    return this.requestManager().request(sid, this.prefixed(subject), data, timeoutMs, msgId)
+  }
+
+  private requestManager(): RequestReplyManager {
+    if (!this._requestManager) {
+      throw new ArbitroError('client not connected — call connect() first', 'connect')
+    }
+    return this._requestManager
   }
 
   /**
@@ -534,6 +562,7 @@ export class ArbitroClient {
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   async close(): Promise<void> {
+    this._requestManager?.close()
     await this.conn.close()
   }
 }

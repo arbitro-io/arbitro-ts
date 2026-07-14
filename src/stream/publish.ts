@@ -125,28 +125,13 @@ export async function streamPublishBatch(
   return firstSeq
 }
 
-/** Request-reply through a stream. Uses V2 PublishWithReply. */
-export async function streamRequest(
-  conn: Connection, sid: number, subject: string, data: Buffer, timeoutMs: number,
-  msgId?: Buffer,
-): Promise<Buffer> {
-  const subj = Buffer.from(subject)
-  const replyTo = Buffer.from(`_INBOX.${conn.nextSeq().toString(36)}`)
-  const frame = packPublishWithReply(
-    conn.nextSeq(), sid, subj, replyTo, data, Flag.AckReq, 0, msgId ?? EMPTY,
-  )
-  await conn.sendExpectReply(frame, timeoutMs)
-  // reply is ref_seq from RepOk — actual reply routing handled differently in V2.
-  // For now, return empty buffer — request-reply semantics need server support.
-  return Buffer.alloc(0)
-}
-
 /**
  * Publish with a reply-to subject, awaiting only the broker's `RepOk`
- * (no reply payload — see `streamRequest`'s note on V2 reply routing).
- * `msgId` opts this publish into the target stream's dedup window, same
- * as `streamPublishAck`. Mirrors the Rust client's
- * `publish_with_reply` / `publish_with_reply_msg_id`.
+ * (no reply payload — actual request/reply correlation is handled by
+ * `RequestReplyManager` in `client/request.ts`, used by
+ * `ArbitroClient.request()`). `msgId` opts this publish into the target
+ * stream's dedup window, same as `streamPublishAck`. Mirrors the Rust
+ * client's `publish_with_reply` / `publish_with_reply_msg_id`.
  */
 export async function streamPublishWithReply(
   conn: Connection, sid: number, subject: string, replyTo: string, data: Buffer,
