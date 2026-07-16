@@ -29,7 +29,7 @@ import type { Stream } from '../src/stream/stream';
 const MAX_BATCH_SIZE = 128;
 const CONNECT_RETRIES = 20;
 const CONNECT_RETRY_DELAY_MS = 150;
-const CONNECT_TIMEOUT_MS = 2_000;
+const CONNECT_TIMEOUT_MS = 30_000;
 const CLEANUP_DELAY_MS = 50;
 const RECEIVE_TIMEOUT_MS = 60_000;
 const BYTES_PER_MB = 1024 * 1024;
@@ -63,6 +63,13 @@ const MSGS = Math.max(0, argInt('--msgs', 10_000));
 const SIZE = Math.max(0, argInt('--size', 128));
 const BATCH = clamp(argInt('--batch', 128), 1, MAX_BATCH_SIZE);
 const ADDR = argString('--addr', '127.0.0.1:9898');
+// When set, single-frame publishes use the fire-and-forget `publishNoAck`
+// path (no AckReq, no broker RepOk) instead of the RepOk-awaiting `publish`.
+// The final publish stays a sync `publish` so its RepOk is the commit barrier.
+const NOACK = argv.includes('--noack');
+// When set (implies fire-and-forget), use the SYNCHRONOUS `publishNoAckSync`
+// path — no Promise / await / microtask per message. Mirrors Rust/Go `publish()`.
+const SYNC = argv.includes('--sync');
 
 // ── Time / formatting helpers ─────────────────────────────────────────────
 
@@ -177,6 +184,9 @@ async function withStream(
     subjectFilter: `${stream}.>`,
     journal: { type: JournalType.Memory },
   }).create();
+  // Cache the stream id so the synchronous fire-and-forget path
+  // (`publishNoAckSync`) can run without a per-message resolve hop.
+  await client.resolveStream(stream);
 
   try {
     await body();
@@ -220,10 +230,23 @@ async function publishLoopSingle(
 
   const last = count - 1;
 
-  for (let i = 0; i < last; i++) {
-    void s.publish(subject, payload).catch(noop);
+  if (SYNC) {
+    // Synchronous fire-and-forget — no Promise / await / microtask per msg.
+    for (let i = 0; i < last; i++) {
+      s.publishNoAckSync(subject, payload);
+    }
+  } else if (NOACK) {
+    for (let i = 0; i < last; i++) {
+      void s.publishNoAck(subject, payload).catch(noop);
+    }
+  } else {
+    for (let i = 0; i < last; i++) {
+      void s.publish(subject, payload).catch(noop);
+    }
   }
 
+  // Final publish is always sync — its RepOk is the commit barrier that
+  // confirms every prior fire-and-forget frame reached the broker (TCP order).
   await s.publish(subject, payload);
 }
 
@@ -306,7 +329,6 @@ async function runPubSub(label: string, batchPublish: boolean): Promise<void> {
         filter: `${stream}.>`,
         deliverPolicy: DeliverPolicy.New,
         ackPolicy: AckPolicy.None,
-        maxAckPending: Math.max(50_000, MSGS),
       });
 
       let received = 0;

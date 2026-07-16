@@ -64,6 +64,20 @@ export function streamPublish(
   conn.send(packPublish(conn.nextSeq(), sid, subj, payload, 0, entryFlags, msgId))
 }
 
+/**
+ * Fire-and-forget publish, hot path — caller provides the pre-resolved
+ * stream_id AND the already-encoded (prefixed) subject Buffer, and there are
+ * no headers/msgId. This skips the per-call `Buffer.from(subject)` re-encode +
+ * `buildPayloadAndFlags` object alloc, leaving `packPublish`'s single frame
+ * allocation as the only per-message heap work — mirroring the Go/Rust
+ * cached-encode publish path. Used by `Client.publishNoAckSync`.
+ */
+export function streamPublishFast(
+  conn: Connection, sid: number, subjectBuf: Buffer, data: Buffer,
+): void {
+  conn.send(packPublish(conn.nextSeq(), sid, subjectBuf, data, 0, 0, EMPTY))
+}
+
 /** Publish + wait for server RepOk confirmation. */
 export async function streamPublishAck(
   conn: Connection, sid: number, subject: string, data: Buffer,

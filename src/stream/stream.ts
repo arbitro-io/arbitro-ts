@@ -70,6 +70,26 @@ export class Stream {
     return this.client.publish(this.name, subject, data, opts)
   }
 
+  /**
+   * Fire-and-forget publish — no ack-request flag, no broker reply, no
+   * per-message round-trip. Resolves once the frame is handed to the socket.
+   * Mirrors Go/Rust `publish()`; use {@link publish} / {@link publishBatch}
+   * for a commit barrier. High-throughput producer path.
+   */
+  publishNoAck(subject: string, data: Buffer, opts?: PublishOpts): Promise<void> {
+    return this.client.publishNoAck(this.name, subject, data, opts)
+  }
+
+  /**
+   * Synchronous fire-and-forget publish (no Promise/await per message) —
+   * the max-throughput producer path, mirroring Rust/Go `publish()`. Requires
+   * the stream id resolved first (any prior `create()`/`publish*()` does this,
+   * or call `client.resolveStream(name)`). See {@link ArbitroClient.publishNoAckSync}.
+   */
+  publishNoAckSync(subject: string, data: Buffer, opts?: PublishOpts): void {
+    this.client.publishNoAckSync(this.name, subject, data, opts)
+  }
+
   /** Batch publish — single V2 BatchPubFrame, ONE round-trip.
    *  Resolves with `first_seq` (the N messages occupy
    *  `[first_seq, first_seq + N - 1]`).

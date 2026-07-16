@@ -6,6 +6,7 @@ import { Consumer } from '../consumer/consumer'
 import { ClientMetrics, type ClientMetricsSnapshot } from './metrics'
 import {
   streamPublish, streamPublishAck, streamPublishBatch, streamPublishWithReply,
+  streamPublishFast,
 } from '../stream/publish'
 import { RequestReplyManager } from './request'
 import {
@@ -130,6 +131,70 @@ export class ArbitroClient {
     opts?: import('../stream/publish').PublishOpts,
   ): Promise<void> {
     return this.publish(streamName, subject, data, opts)
+  }
+
+  /**
+   * Fire-and-forget publish — sends the message with NO ack-request flag,
+   * so the broker sends NO reply frame. Resolves once the frame is handed to
+   * the socket (the stream id is resolved on first use, then cached).
+   *
+   * This mirrors the Go/Rust `publish()` fire-and-forget contract and is the
+   * high-throughput producer path: no per-message RepOk round-trip, no
+   * pending-reply slot, no timer. Use {@link publish} (awaits RepOk) or
+   * {@link publishBatch} when you need a commit barrier / broker confirmation.
+   */
+  async publishNoAck(
+    streamName: string, subject: string, data: Buffer,
+    opts?: import('../stream/publish').PublishOpts,
+  ): Promise<void> {
+    const sid = await this.resolveStreamId(streamName)
+    streamPublish(this.conn, sid, this.prefixed(subject), data, opts)
+    this._metrics.publishesSent++
+  }
+
+  /**
+   * Synchronous fire-and-forget publish — the highest-throughput producer
+   * path, mirroring the Rust/Go `publish()`: no Promise, no `await`, no
+   * per-message microtask. Encodes the frame and hands it to the (write-
+   * coalescing) socket directly.
+   *
+   * Requires the stream id to be resolved already — call `resolveStream(name)`
+   * once (or any prior `publish*`/`createStream`) beforehand; throws
+   * `ArbitroError('protocol')` if the stream is unknown. This is the tradeoff
+   * for dropping the `await resolveStreamId` hop that caps the async
+   * {@link publishNoAck} — the caller pre-pays the one-time resolution so the
+   * hot loop stays allocation- and Promise-free per message.
+   */
+  publishNoAckSync(
+    streamName: string, subject: string, data: Buffer,
+    opts?: import('../stream/publish').PublishOpts,
+  ): void {
+    const sid = this.cachedSid(streamName)
+    if (opts) {
+      // Headers / msgId present — full path (per-call encode).
+      streamPublish(this.conn, sid, this.prefixed(subject), data, opts)
+    } else {
+      // Hot path: reuse the cached, already-prefixed+encoded subject Buffer —
+      // no per-call `Buffer.from`/prefix concat/opts object. Only
+      // `packPublish`'s single frame alloc remains, matching Go/Rust.
+      streamPublishFast(this.conn, sid, this.subjectBuf(subject), data)
+    }
+    this._metrics.publishesSent++
+  }
+
+  /** Cache of `(raw subject) → prefixed+encoded Buffer` for the hot
+   * fire-and-forget path. A hot publisher hits a handful of subjects, so the
+   * map stays tiny; it's cleared wholesale past a sanity bound to cap memory
+   * for callers that publish to unboundedly-many distinct subjects. */
+  private readonly subjBufCache = new Map<string, Buffer>()
+  private subjectBuf(subject: string): Buffer {
+    let b = this.subjBufCache.get(subject)
+    if (b === undefined) {
+      if (this.subjBufCache.size >= 4096) this.subjBufCache.clear()
+      b = Buffer.from(this.prefixed(subject))
+      this.subjBufCache.set(subject, b)
+    }
+    return b
   }
 
   /** Batch publish — single V2 BatchPubFrame, ONE round-trip. Resolves

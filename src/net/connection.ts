@@ -94,7 +94,19 @@ export class Connection {
 
   private attachSocket(socket: net.Socket): void {
     socket.setNoDelay(true)
-    socket.on('data', (chunk: Buffer) => this.framer.push(chunk, (f) => this.onFrame(f)))
+    socket.on('data', (chunk: Buffer) => {
+      // A malformed/truncated frame (bad msg_len, short body) would otherwise
+      // throw synchronously inside `framer.push` / `onFrame` — and a throw in a
+      // 'data' listener becomes an `uncaughtException` that KILLS the process.
+      // Contain it: log, surface via the socket 'error'/'close' path, and tear
+      // the connection down so the reconnect state machine recovers cleanly.
+      try {
+        this.framer.push(chunk, (f) => this.onFrame(f))
+      } catch (err) {
+        this.log.error({ err }, 'protocol error decoding inbound frame, dropping connection')
+        socket.destroy()
+      }
+    })
     socket.on('error', (err) => this.drain(err))
     socket.on('close', () => this.handleClose())
   }
@@ -423,18 +435,39 @@ export class Connection {
 
   // ── Write ─────────────────────────────────────────────────────────────────
 
+  /** Write-coalescing: cork the socket on the first write of an event-loop
+   * tick and uncork on the next microtask. Every frame written within the
+   * same tick (e.g. a loop firing N fire-and-forget publishes, or N acks)
+   * is flushed by a single `_writev` — one vectored syscall instead of N,
+   * without any `Buffer.concat`. Mirrors the single-writer batching of the
+   * Go/Rust clients. `setNoDelay(true)` stays on, so the coalesced batch is
+   * still sent immediately (no Nagle delay) once uncorked. */
+  private corked = false
+  private write(frame: Buffer): boolean {
+    const sock = this.socket
+    if (!sock.writable || sock.destroyed) return false
+    if (!this.corked) {
+      this.corked = true
+      sock.cork()
+      queueMicrotask(() => {
+        this.corked = false
+        if (!sock.destroyed) sock.uncork()
+      })
+    }
+    try {
+      sock.write(frame)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   /** Returns `true` if the frame was handed off to the socket, `false` if
    * the socket isn't connected/writable or the write threw. Callers on
    * the ack path (see `Message.ack`) use this to fall back to the
    * `AckRelay` hot tier instead of silently losing the ack. */
   send(frame: Buffer): boolean {
-    if (!this.socket.writable || this.socket.destroyed) return false
-    try {
-      this.socket.write(frame)
-      return true
-    } catch {
-      return false
-    }
+    return this.write(frame)
   }
 
   /** Send frame and wait for RepOk. Returns the ref_seq from body. */
@@ -452,7 +485,7 @@ export class Connection {
         },
         reject: (e) => { clearTimeout(timer); reject(e) },
       })
-      this.socket.write(frame)
+      this.write(frame)
     })
   }
 
@@ -468,7 +501,7 @@ export class Connection {
         resolve: (f) => { clearTimeout(timer); resolve(f) },
         reject: (e) => { clearTimeout(timer); reject(e) },
       })
-      this.socket.write(frame)
+      this.write(frame)
     })
   }
 
