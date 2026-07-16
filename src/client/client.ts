@@ -134,6 +134,20 @@ export class ArbitroClient {
   }
 
   /**
+   * Explicit wait-for-ack publish — name-parity alias for the Rust reference
+   * client's `publish_wait` (awaits the broker `RepOk`, NOT a disk fsync).
+   * Identical to {@link publish}; provided so code ported from the Rust/other
+   * clients can call the same method name. Use {@link publishNoAck} for
+   * fire-and-forget.
+   */
+  publishWait(
+    streamName: string, subject: string, data: Buffer,
+    opts?: import('../stream/publish').PublishOpts,
+  ): Promise<void> {
+    return this.publish(streamName, subject, data, opts)
+  }
+
+  /**
    * Fire-and-forget publish — sends the message with NO ack-request flag,
    * so the broker sends NO reply frame. Resolves once the frame is handed to
    * the socket (the stream id is resolved on first use, then cached).
