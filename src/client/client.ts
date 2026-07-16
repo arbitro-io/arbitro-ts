@@ -13,7 +13,7 @@ import {
   packPublish, packCreateStream, packDeleteStream, packGetStream,
   packPurgeStream, packDrainSubject, packDeleteMessage, packListStreams,
   packCreateConsumer, packDeleteConsumer, packGetConsumer, packListConsumers,
-  packConsumerStats,
+  packConsumerStats, packPauseConsumer, packResumeConsumer,
   type CreateConsumerOpts,
 } from '../proto/v2'
 import { Flag, HEADER_SIZE } from '../proto/constants'
@@ -520,6 +520,31 @@ export class ArbitroClient {
     await this.conn.sendExpectReply(
       packDeleteConsumer(this.conn.nextSeq(), consumerId),
     )
+  }
+
+  /** Pause delivery for a consumer (broker action 0x0506). */
+  async pauseConsumer(idOrStream: number | string, name?: string): Promise<void> {
+    const consumerId = await this.resolveConsumerIdOrThrow(idOrStream, name)
+    await this.conn.sendExpectReply(
+      packPauseConsumer(this.conn.nextSeq(), consumerId),
+    )
+  }
+
+  /** Resume delivery for a paused consumer (broker action 0x0507). */
+  async resumeConsumer(idOrStream: number | string, name?: string): Promise<void> {
+    const consumerId = await this.resolveConsumerIdOrThrow(idOrStream, name)
+    await this.conn.sendExpectReply(
+      packResumeConsumer(this.conn.nextSeq(), consumerId),
+    )
+  }
+
+  private async resolveConsumerIdOrThrow(
+    idOrStream: number | string, name?: string,
+  ): Promise<number> {
+    if (typeof idOrStream === 'number') return idOrStream
+    const id = await this.getConsumerId(idOrStream, name!)
+    if (id === null) throw new Error(`consumer not found: ${idOrStream}/${name}`)
+    return id
   }
 
   async getConsumerId(streamName: string, name: string): Promise<number | null> {
