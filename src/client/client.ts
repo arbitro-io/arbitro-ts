@@ -377,11 +377,13 @@ export class ArbitroClient {
    * })
    * ```
    */
-  queueSubscribe(streamName: string, opts: QueueOptions): Promise<Subscription> {
+  async queueSubscribe(streamName: string, opts: QueueOptions): Promise<Subscription> {
     // One value drives both the durable consumer name and the queue group.
     // Keeping them equal is what makes concurrent joins idempotent instead
-    // of a config clash, so they are never settable apart.
-    const group = opts.group ?? streamName
+    // of a config clash, so they are never settable apart. An empty string
+    // means "unset" here, matching the Go and C clients — `??` alone would
+    // let `group: ''` through and the broker would reject the empty name.
+    const group = opts.group || streamName
 
     // Unset knobs are omitted rather than passed as `undefined` — under
     // exactOptionalPropertyTypes those are different things, and omitting
@@ -389,8 +391,10 @@ export class ArbitroClient {
     const config: ConsumerConfig = {
       name:      group,
       group,
-      // The subject filter belongs to the subscription, not the consumer.
-      filter:    opts.filter ?? '',
+      // The subject filter belongs to the subscription, not the consumer:
+      // workers on one queue may narrow differently, and a consumer-level
+      // filter would durably record the first joiner's view for everyone.
+      filter:    '',
       fanout:    false,
       ackPolicy: AckPolicy.Explicit,
       ...(opts.maxInflight         !== undefined && { maxAckPending:       opts.maxInflight }),
@@ -400,7 +404,14 @@ export class ArbitroClient {
       ...(opts.maxSubjectInflights !== undefined && { maxSubjectInflights: opts.maxSubjectInflights }),
     }
 
-    return this.subscribe(streamName, config, opts.onMessage)
+    // Always send the create rather than going through `subscribe`'s
+    // get-first path: that path returns an existing consumer WITHOUT
+    // comparing config, so a worker joining with a different ackWaitMs would
+    // silently inherit the old one here while the Rust, Go and C clients all
+    // surface InvalidConsumerConfig. Same mistake, same answer everywhere.
+    await this.createConsumerRaw(streamName, config)
+
+    return this.subscribe(streamName, { ...config, filter: opts.filter ?? '' }, opts.onMessage)
   }
 
   // ── Stream management ─────────────────────────────────────────────────────
