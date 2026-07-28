@@ -1,5 +1,7 @@
 import type { ArbitroClient } from '../client/client'
 import type { StreamConfig, ConsumerConfig, DeleteStreamOpts, StreamInfo } from '../types/config'
+import type { QueueOptions } from '../types/queue'
+import type { Subscription } from '../subscription/subscription'
 import type { Encoding } from '../utils/codec'
 import { Consumer } from '../consumer/consumer'
 import { Topic } from '../topic/topic'
@@ -107,6 +109,24 @@ export class Stream {
   /** Tombstone a single message by seq. Returns true if found. */
   deleteMessage(seq: bigint): Promise<boolean> {
     return this.client.deleteMessage(this.name, seq)
+  }
+
+  /**
+   * Join a durable work queue on this stream. The stream supplies itself and
+   * the queue identity, so the common case is just a handler:
+   *
+   * ```ts
+   * await stream.queueSubscribe({
+   *   onMessage(msg) { process(msg.data); msg.ack() },
+   * })
+   * ```
+   *
+   * `group` defaults to this stream's name — override it to run a second,
+   * independent queue over the same stream. See
+   * {@link ArbitroClient.queueSubscribe}.
+   */
+  queueSubscribe(opts: QueueOptions): Promise<Subscription> {
+    return this.client.queueSubscribe(this.name, opts)
   }
 
   // ── Context factories ───────────────────────────────────────────────────

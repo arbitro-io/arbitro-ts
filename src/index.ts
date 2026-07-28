@@ -38,6 +38,9 @@ export type {
   SubjectInflightLimit,
 } from "./types";
 
+/** Settings for `queueSubscribe` — the one-call durable work queue. */
+export type { QueueOptions } from "./types/queue";
+
 export {
   Codec,
   JsonCodec,

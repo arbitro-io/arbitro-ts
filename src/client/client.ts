@@ -21,6 +21,7 @@ import type {
   ClientConfig, StreamConfig, ConsumerConfig, SubscribeOptions,
   DeleteStreamOpts, StreamInfo, ConsumerInfo,
 } from '../types/config'
+import type { QueueOptions } from '../types/queue'
 import { AckPolicy, DeliverPolicy, JournalType } from '../types/config'
 import { Message } from '../message/message'
 import { BatchPublishEntry } from '../proto/publish'
@@ -353,6 +354,53 @@ export class ArbitroClient {
     }
     if (callback) sub.onMessage(callback)
     return sub
+  }
+
+  /**
+   * Join a durable work queue on `streamName` in one call.
+   *
+   * Every worker calls this with the same `group`; the broker load-balances
+   * between them so each message is delivered to exactly ONE member. Omit
+   * `group` and it defaults to the stream name.
+   *
+   * A DIFFERENT `group` is a separate, independent durable queue over the
+   * same stream — its own cursor, its own copy of the messages.
+   *
+   * The queue is durable and explicit-ack: it survives broker restarts and
+   * worker disconnects, and redelivers anything a worker took but never
+   * acked. Ack in `onMessage` when the job is done.
+   *
+   * ```ts
+   * await client.queueSubscribe('orders', {
+   *   filter: 'orders.>',
+   *   onMessage(msg) { process(msg.data); msg.ack() },
+   * })
+   * ```
+   */
+  queueSubscribe(streamName: string, opts: QueueOptions): Promise<Subscription> {
+    // One value drives both the durable consumer name and the queue group.
+    // Keeping them equal is what makes concurrent joins idempotent instead
+    // of a config clash, so they are never settable apart.
+    const group = opts.group ?? streamName
+
+    // Unset knobs are omitted rather than passed as `undefined` — under
+    // exactOptionalPropertyTypes those are different things, and omitting
+    // lets each default come from the layer that owns it.
+    const config: ConsumerConfig = {
+      name:      group,
+      group,
+      // The subject filter belongs to the subscription, not the consumer.
+      filter:    opts.filter ?? '',
+      fanout:    false,
+      ackPolicy: AckPolicy.Explicit,
+      ...(opts.maxInflight         !== undefined && { maxAckPending:       opts.maxInflight }),
+      ...(opts.ackWaitMs           !== undefined && { ackWaitMs:           opts.ackWaitMs }),
+      ...(opts.deliverPolicy       !== undefined && { deliverPolicy:       opts.deliverPolicy }),
+      ...(opts.startSeq            !== undefined && { startSeq:            opts.startSeq }),
+      ...(opts.maxSubjectInflights !== undefined && { maxSubjectInflights: opts.maxSubjectInflights }),
+    }
+
+    return this.subscribe(streamName, config, opts.onMessage)
   }
 
   // ── Stream management ─────────────────────────────────────────────────────
