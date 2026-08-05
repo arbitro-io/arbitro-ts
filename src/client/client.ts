@@ -517,8 +517,14 @@ export class ArbitroClient {
   private async createConsumerRaw(streamName: string, config: ConsumerConfig): Promise<number> {
     validateConsumerConfig(config)
     const sid = await this.resolveStreamId(streamName)
-    const name = Buffer.from(config.name ?? streamName)
-    const group = Buffer.from(config.group ?? config.name ?? streamName)
+    // group | name | stream, with `||` rather than `??`: an explicit `''`
+    // means "unset" here, not "send an empty group". The broker rejects an
+    // empty group, and before it did it silently filed the consumer into one
+    // anonymous queue shared with every other groupless consumer on the
+    // stream. Same rule, same operator as `queueSubscribe` above — filling
+    // the group in is the client's job on EVERY create path.
+    const name = Buffer.from(config.name || streamName)
+    const group = Buffer.from(config.group || config.name || streamName)
     const filter = Buffer.from(config.filter ?? '')
 
     const ackPolicyByte = config.ackPolicy === AckPolicy.None ? 0 : 1
@@ -556,7 +562,7 @@ export class ArbitroClient {
     } catch (e: any) {
       if (!(e instanceof ArbitroError) || e.wireCode !== ErrorCode.ConsumerAlreadyExists) throw e
       // Already exists — look up its server-assigned ID.
-      const consumerId = await this.getConsumerId(streamName, config.name ?? streamName)
+      const consumerId = await this.getConsumerId(streamName, config.name || streamName)
       if (consumerId !== null) return new Consumer(this, streamName, config, consumerId)
       throw e
     }
@@ -691,7 +697,9 @@ export class ArbitroClient {
   }
 
   private async ensureConsumer(streamName: string, config: ConsumerConfig): Promise<number> {
-    const name = config.name ?? streamName
+    // Must resolve the name exactly as `createConsumerRaw` does, or the
+    // get-first lookup misses the consumer the create path would produce.
+    const name = config.name || streamName
     const existing = await this.getConsumerId(streamName, name)
     if (existing !== null) return existing
     return this.createConsumerRaw(streamName, config)

@@ -93,7 +93,11 @@ export interface SubjectInflightLimit {
 
 export interface ConsumerConfig {
   name?:                string   // defaults to stream name when created via stream.consumer()
-  /** Shared consumer group name for round-robin delivery. Defaults to `name`. */
+  /**
+   * Shared consumer group name for round-robin delivery. Unset (or `''`)
+   * falls back to `name`, then to the stream name — the client always sends
+   * a non-empty group, because the broker rejects an empty one.
+   */
   group?:               string
   filter?:              string   // defaults to "${streamName}.>" when created via stream.consumer()
   fanout?:              boolean   // broadcast — every subscriber receives every message

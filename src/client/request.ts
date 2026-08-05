@@ -22,11 +22,24 @@ import { ArbitroError } from '../types/error'
 
 const EMPTY = Buffer.alloc(0)
 
-let NEXT_INSTANCE_ID = 1
+/**
+ * Identifies this client instance's private reply mailbox.
+ *
+ * It MUST be unique across processes, not just within one. A module-level
+ * counter is not: every process starts it at 1, so N replicas of the same
+ * service all ask the broker for the consumer `_reply-1-<stream>`. The broker
+ * derives consumer identity from that name and allows one binding per
+ * subscription, so each replica that starts RETIRES the previous one's
+ * binding — only the last replica to boot receives its replies, and every
+ * `request()` from the others times out forever. Invisible with one replica;
+ * appears the moment you scale to two.
+ *
+ * A random 32-bit draw removes the collision. The value is an identifier,
+ * never a secret, so `Math.random` is sufficient — the same reasoning (and
+ * the same fix) as `service/index.ts`.
+ */
 function nextInstanceId(): number {
-  const id = NEXT_INSTANCE_ID++
-  if (NEXT_INSTANCE_ID > 0xFFFFFFFF) NEXT_INSTANCE_ID = 1
-  return id
+  return Math.floor(Math.random() * 0xFFFFFFFF) + 1
 }
 
 interface PendingRequest {
@@ -101,7 +114,11 @@ export class RequestReplyManager {
       packCreateConsumer(this.conn.nextSeq(), {
         streamId: sid,
         name,
-        group: Buffer.from(''), // no group — per-instance, never load-balanced
+        // Per-instance, never load-balanced: the group is the consumer's own
+        // unique name, so no sibling ever joins it. Never empty — the broker
+        // rejects an empty group, and filling it in is the client's job on
+        // every create path (see `createConsumerRaw`).
+        group: name,
         filter: Buffer.from(filter),
         maxInflight: 1024,
         ackPolicy: 1,

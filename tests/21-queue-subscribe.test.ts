@@ -141,6 +141,42 @@ describe('queueSubscribe', () => {
     await worker.close()
   })
 
+  // Same rule one level down, on the general create path: an explicit
+  // `group: ''` means "unset", never "send an empty group". It used to reach
+  // the wire verbatim, and the broker filed every groupless consumer on a
+  // stream into ONE anonymous queue keyed (stream_id, "") — so two unrelated
+  // consumers silently load-balanced against each other. Falling back to the
+  // consumer name gives each its own queue and its own full copy.
+  it('falls back to the consumer name when group is an empty string', async () => {
+    const name = scope.track(uniqueName('qs-empty'))
+    await makeStream(name)
+
+    const a: string[] = []
+    const b: string[] = []
+    const [ca, cb] = await Promise.all([createClient(), createClient()])
+    const subA = await ca.subscribe(name, {
+      name: `${name}-a`, group: '', filter: `${name}.>`,
+    }, (msg) => { a.push(msg.data().toString()); msg.ack() })
+    const subB = await cb.subscribe(name, {
+      name: `${name}-b`, group: '', filter: `${name}.>`,
+    }, (msg) => { b.push(msg.data().toString()); msg.ack() })
+
+    const N = 4
+    for (let i = 0; i < N; i++) {
+      await admin.publish(name, `${name}.job`, Buffer.from(`m${i}`))
+    }
+
+    // Shared anonymous queue would split these ~2/2 and never reach N each.
+    await waitUntil(() => a.length >= N && b.length >= N, 10_000)
+    expect(a.length).toBe(N)
+    expect(b.length).toBe(N)
+
+    subA.close(); subB.close()
+    await admin.deleteConsumer(name, `${name}-a`)
+    await admin.deleteConsumer(name, `${name}-b`)
+    await Promise.all([ca.close(), cb.close()])
+  })
+
   // The stream context supplies itself and the queue identity, so the
   // common case is a handler and nothing else.
   it('joins from a Stream context with only a handler', async () => {

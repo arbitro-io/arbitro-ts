@@ -10,11 +10,19 @@ const SVC_PREFIX = '_svc.'
 const METHOD_INFIX = '.m.'
 const REPLY_INFIX = '._r.'
 
-let NEXT_INSTANCE_ID = 1
+/**
+ * Instance ids must be unique across PROCESSES, not just within one.
+ * They name broker-side consumers (`_svc-<name>-reply-<instanceId>`), and
+ * the broker derives a consumer's identity from its name — so two processes
+ * that both started their counter at 1 minted the same consumer, and the
+ * second subscribe evicted the first (one subscription per consumer id,
+ * see catalog::subscribe). The losing process then never saw its own
+ * replies. A random 32-bit draw per instance removes the collision; the
+ * value is an identifier, never a secret, so `Math.random` is sufficient.
+ */
 function nextInstanceId(): number {
-  const id = NEXT_INSTANCE_ID++
-  if (NEXT_INSTANCE_ID > 0xFFFFFFFF) NEXT_INSTANCE_ID = 1
-  return id
+  // Range [1, 0xFFFFFFFF] — 0 is reserved as "unset".
+  return Math.floor(Math.random() * 0xFFFFFFFF) + 1
 }
 
 /**
@@ -234,33 +242,51 @@ export class ServiceBuilder {
     const svc = new Service(this.name, streamId, this.conn, this.client)
 
     // Worker consumer: queue-grouped, receives ONLY method calls (`.m.>`).
+    //
+    // Every instance of this service joins ONE group (`workerGroup`) through
+    // its OWN durable consumer (`workerName`, instance-suffixed). Both halves
+    // are load-bearing:
+    //   - Distinct consumer NAME: the broker keys a subscription by consumer
+    //     id (`SubscriptionId(consumer_id)`), and a second subscribe on the
+    //     same id retires the first binding. Sharing one worker name across
+    //     instances therefore did not duplicate work — it starved every
+    //     instance but the last one to subscribe, which took 100% of traffic.
+    //   - Shared GROUP + Queue deliver mode: the group is what the drain
+    //     round-robins over. Fanout (deliverMode 0) makes the broker force
+    //     QueueId(0) and discard the group entirely, so each instance would
+    //     instead receive its own copy of every request.
+    // Measured on a live broker: 3 members, 30 requests → 10/10/10.
     const workerFilter = `${SVC_PREFIX}${this.name}${METHOD_INFIX}>`
-    const workerName = `_svc-${this.name}-worker`
+    const workerGroup = `_svc-${this.name}-worker`
+    const workerName = `${workerGroup}-${svc.instanceId}`
     const workerRef = await this.conn.sendExpectReply(
       packCreateConsumer(this.conn.nextSeq(), {
         streamId,
         name: Buffer.from(workerName),
-        group: Buffer.from(workerName),
+        group: Buffer.from(workerGroup),
         filter: Buffer.from(workerFilter),
         maxInflight: this.maxInflight,
         ackPolicy: 1,
         deliverPolicy: 0,
-        deliverMode: 0,
+        deliverMode: 1, // Queue — matches the Go client's worker consumer.
         ackWaitMs: 30_000,
         startSeq: 0n,
       }),
     )
     const workerConsumerId = Number(workerRef & 0xFFFFFFFFn)
 
-    // Reply consumer: per-instance, NO group — replies MUST NOT be
-    // load-balanced to sibling instances.
+    // Reply consumer: per-instance — replies MUST NOT be load-balanced to
+    // sibling instances. The group is the per-instance consumer name, which
+    // no sibling shares, so solo delivery holds while still satisfying the
+    // broker's non-empty-group rule (an empty group is a client bug: it used
+    // to land every groupless consumer in one shared anonymous queue).
     const replyFilter = `${SVC_PREFIX}${this.name}${REPLY_INFIX}${svc.instanceId}.>`
     const replyName = `_svc-${this.name}-reply-${svc.instanceId}`
     const replyRef = await this.conn.sendExpectReply(
       packCreateConsumer(this.conn.nextSeq(), {
         streamId,
         name: Buffer.from(replyName),
-        group: Buffer.from(''),
+        group: Buffer.from(replyName),
         filter: Buffer.from(replyFilter),
         maxInflight: this.maxInflight,
         ackPolicy: 1,

@@ -171,13 +171,16 @@ export class WorkflowBuilder {
       suspended, nacked,
     }
 
-    // Fanout consumer on state stream — unique per worker (no group).
+    // Fanout consumer on state stream — unique per worker. The group is
+    // left unset so it defaults to the (per-worker unique) consumer name:
+    // nothing shares it, so every worker still sees every state event.
+    // Sending `group: ''` instead would be a client bug — the broker
+    // rejects an empty group.
     // DeliverPolicy::All replays all park/remove events to build the map.
     const parkPrefix = `_wf.${name}.__state.park.`
     const removePrefix = `_wf.${name}.__state.remove.`
     const stateSub = await this.client.subscribe(stateStream, {
       name: `_wf_${name}_state_w${uid}`,
-      group: '',
       fanout: true,
       filter: stateSubject,
       ackPolicy: AckPolicy.Explicit,
