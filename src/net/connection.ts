@@ -17,6 +17,7 @@ import { CronState } from '../cron/cron-state'
 import { decodeCronFire, packCronAck, packCreateCron } from '../cron/cron-frame'
 import {
   unpackAckStateRep, unpackAckBatchResp, packAckStateReq, packAckBatch,
+  ACK_STATUS_OK,
   type AckStateRepBody, type AckBatchRespBody,
 } from '../proto/ackrel'
 import { AckRelay } from '../ackrel'
@@ -75,6 +76,17 @@ export class Connection {
    * override to observe raw AckStateRep/AckBatchResp frames instead. */
   onAckStateRep?: (body: AckStateRepBody) => void
   onAckBatchResp?: (body: AckBatchRespBody) => void
+
+  /** Broker-cursor sink for the durable dedup store: everything at or below
+   * `cursor` is confirmed and can be dropped from the ackstore live set.
+   * Wired by `ArbitroClient` when an ackstore is configured. */
+  onAckConfirm?: (consumerId: number, cursor: bigint) => void
+
+  /** Consumers that carry an ackstore slot. They need the broker's cursor on
+   * every (re)connect even with zero deferred acks — an idle consumer never
+   * sees an AckBatchResp, so nothing would ever purge entries recorded by a
+   * previous, dead session. */
+  private readonly durableConsumers = new Set<number>()
 
   private constructor(
     socket: net.Socket,
@@ -184,6 +196,10 @@ export class Connection {
   /** Bump `nacksSent` — called by `Message.nack()` / `nackDelay()`. */
   bumpNacksSent(): void { if (this.metrics) this.metrics.nacksSent++ }
 
+  /** Bump `redeliveriesSkipped` — called when the ackstore recognizes a
+   * redelivery and the subscription re-acks without running the handler. */
+  bumpRedeliveriesSkipped(): void { if (this.metrics) this.metrics.redeliveriesSkipped++ }
+
   // ── Ack batching ─────────────────────────────────────────────────────────
 
   /** Queue one ack for `consumerId`/`seq`. Called by `Message.ack()`
@@ -284,19 +300,15 @@ export class Connection {
         return
       }
       case Action.AckStateRep: {
-        if (!this.onAckStateRep) {
-          this.log.debug('AckStateRep received with no handler, dropped')
-          return
-        }
-        this.onAckStateRep(unpackAckStateRep(frame.subarray(HEADER_SIZE)))
+        this.handleAckStateRep(unpackAckStateRep(frame.subarray(HEADER_SIZE)))
         return
       }
       case Action.AckBatchResp: {
-        if (!this.onAckBatchResp) {
-          this.log.debug('AckBatchResp received with no handler, dropped')
-          return
-        }
-        this.onAckBatchResp(unpackAckBatchResp(frame.subarray(HEADER_SIZE)))
+        const body = unpackAckBatchResp(frame.subarray(HEADER_SIZE))
+        // The broker confirmed a cumulative ack up to `newCursor`, so those
+        // seqs are safe to drop from the durable dedup live set.
+        this.onAckConfirm?.(body.consumerId, body.newCursor)
+        this.onAckBatchResp?.(body)
         return
       }
       default: {
@@ -304,6 +316,36 @@ export class Connection {
         this.log.debug({ action: `0x${action.toString(16)}` }, 'unknown action, dropped')
       }
     }
+  }
+
+  /**
+   * `AckStateRep` — the broker's authoritative cursor/retention snapshot for
+   * one consumer, sent in reply to the `AckStateReq` we fire on subscribe and
+   * on every reconnect.
+   *
+   * The durable-dedup purge runs BEFORE (and independently of) the ackrel
+   * generation check the hot tier does: the ackstore slot is keyed by the
+   * DURABLE `(stream, consumer)` names, so a fresh process — local generation
+   * 0, broker generation possibly bumped by consumer-id recycling — must still
+   * purge entries recorded by a previous, dead session. That reconnect purge
+   * is the whole point of the on-(re)connect `AckStateReq`.
+   *
+   * Deliberate conservatism: the purge only runs when the broker vouches for
+   * the cursor (`status === ACK_STATUS_OK`). On any other status — notably
+   * CONSUMER_UNKNOWN (deleted, or broker restarted without it) — we purge
+   * NOTHING, even though the entries are probably useless: a recreated
+   * same-name consumer answers a later request with OK and its own cursor, and
+   * stale entries are left to the store TTL. A wrongly kept entry costs a
+   * little disk; a wrongly dropped one costs a duplicate execution of real work.
+   */
+  private handleAckStateRep(body: AckStateRepBody): void {
+    if (body.status === ACK_STATUS_OK) {
+      this.onAckConfirm?.(body.consumerId, body.cursor)
+      // Below the broker's retention floor: never confirmable, never
+      // redeliverable — same reasoning as the cursor, one seq lower.
+      if (body.lowSeq > 0n) this.onAckConfirm?.(body.consumerId, body.lowSeq - 1n)
+    }
+    this.onAckStateRep?.(body)
   }
 
   private handleBatchDeliver(frame: Buffer): void {
@@ -399,7 +441,20 @@ export class Connection {
   cancelSubscription(consumerId: number): void {
     this.routes.delete(consumerId)
     this.activeSubs.delete(consumerId)
+    this.durableConsumers.delete(consumerId)
     this.socket.write(packUnsubscribe(this.nextSeq(), this.connId, consumerId))
+  }
+
+  /**
+   * Ask the broker for `consumerId`'s authoritative ack cursor and remember to
+   * ask again on every reconnect. Called once per subscribe that carries an
+   * ackstore slot: the store may hold entries recorded by a previous, dead
+   * session whose AckBatchResp never arrived, so nothing else would ever
+   * confirm them. Cold path — one 24 B fire-and-forget frame per subscribe.
+   */
+  requestAckState(consumerId: number): void {
+    this.durableConsumers.add(consumerId)
+    this.send(packAckStateReq(this.nextSeq(), consumerId, this.ackRelay.generationOf(consumerId)))
   }
 
   private resubscribeAll(): void {
@@ -561,10 +616,21 @@ export class Connection {
 
   /** On every successful reconnect: bump each tracked consumer's
    * generation and ask the broker for its authoritative ack cursor —
-   * mirrors `send_ack_state_reqs` at `conn/session.rs:190`. */
+   * mirrors `send_ack_state_reqs` at `conn/session.rs:190`.
+   *
+   * Consumers that hold an ackstore slot are queried too, even with no
+   * deferred acks: an idle durable consumer never sees an AckBatchResp, so
+   * this is the only thing that purges entries left by a dead session. */
   private replayAckState(): void {
+    const sent = new Set<number>()
     for (const consumerId of this.ackRelay.consumerIds()) {
       this.ackRelay.bumpGeneration(consumerId)
+      const generation = this.ackRelay.generationOf(consumerId)
+      this.send(packAckStateReq(this.nextSeq(), consumerId, generation))
+      sent.add(consumerId)
+    }
+    for (const consumerId of this.durableConsumers) {
+      if (sent.has(consumerId)) continue
       const generation = this.ackRelay.generationOf(consumerId)
       this.send(packAckStateReq(this.nextSeq(), consumerId, generation))
     }

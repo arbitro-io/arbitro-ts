@@ -47,6 +47,8 @@
     "bench": "tsx benches/throughput.ts",
     "bench:limit": "tsx benches/limits.ts",
     "bench:chaos": "tsx benches/chaos.ts",
+    "bench:ackstore": "tsx benches/ackstore.ts",
+    "ackstore:xcompat": "tsx examples/ackstore-xcompat.ts",
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "publishConfig": {

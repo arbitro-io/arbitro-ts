@@ -34,6 +34,7 @@ export class Message {
   private readonly onNack: (() => void) | undefined
   private readonly onAckSendFailure: ((consumerId: number, seq: bigint) => void) | undefined
   private readonly enqueueAck: ((consumerId: number, subjectHash: number, seq: bigint) => void) | undefined
+  private readonly recordDedup: ((seq: bigint) => void) | undefined
   private _subjectLen: number | undefined
   private _replyToLen: number | undefined
 
@@ -42,6 +43,7 @@ export class Message {
     onAck?: () => void, onNack?: () => void,
     onAckSendFailure?: (consumerId: number, seq: bigint) => void,
     enqueueAck?: (consumerId: number, subjectHash: number, seq: bigint) => void,
+    recordDedup?: (seq: bigint) => void,
   ) {
     this.frame = frame
     this.send  = send
@@ -50,6 +52,7 @@ export class Message {
     this.onNack = onNack
     this.onAckSendFailure = onAckSendFailure
     this.enqueueAck = enqueueAck
+    this.recordDedup = recordDedup
   }
 
   /** Delivery sequence — used to ack/nack this message. */
@@ -118,6 +121,11 @@ export class Message {
    * lost — it's resent by the connection's sweep loop / reconnect replay
    * once the socket recovers. */
   ack(): void {
+    // Record BEFORE the ack leaves: this seq is now "handler ran". The write
+    // is a buffered append (see `WalWriter`), durable on the next store sync.
+    // Ordering matters — an ack the broker acts on before we record would let
+    // a redelivery race the record and re-run the handler.
+    this.recordDedup?.(this.seq())
     if (this.enqueueAck) {
       this.enqueueAck(this.consumerId(), this.subjectHash(), this.seq())
       this.onAck?.()

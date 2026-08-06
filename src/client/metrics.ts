@@ -25,6 +25,8 @@ export interface ClientMetricsSnapshot {
   acksConfirmed:        number
   /** Deferred acks dropped as expired (fell below the broker's retention window). */
   acksExpired:          number
+  /** Redeliveries skipped because the ackstore had already recorded the seq. */
+  redeliveriesSkipped:  number
 }
 
 /**
@@ -47,6 +49,7 @@ export class ClientMetrics {
   acksDeferred         = 0
   acksConfirmed        = 0
   acksExpired          = 0
+  redeliveriesSkipped  = 0
 
   snapshot(): ClientMetricsSnapshot {
     return {
@@ -61,6 +64,7 @@ export class ClientMetrics {
       acksDeferred:        this.acksDeferred,
       acksConfirmed:       this.acksConfirmed,
       acksExpired:         this.acksExpired,
+      redeliveriesSkipped: this.redeliveriesSkipped,
     }
   }
 }

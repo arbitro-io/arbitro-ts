@@ -165,13 +165,50 @@ await client.getPending(consumerId)
 await client.getPending('orders', 'workers')
 ```
 
+## Redelivery Dedup (ackstore)
+
+The broker guarantees at-least-once delivery, so a message whose ack was lost
+comes back. `ackStore` records `(stream, consumer, seq)` for every message the
+handler completed, and the delivery path skips — and silently re-acks — anything
+it already ran. Off by default.
+
+```typescript
+const client = new ArbitroClient({
+  servers:  ['127.0.0.1:9898'],
+  ackStore: { dir: './.arbitro-ack' },   // persistent; omit `dir` for in-memory
+})
+```
+
+With `dir` set, the dedup set is a write-ahead log, so a worker that restarts
+does not re-execute work it already completed. The on-disk format is
+byte-identical to the Rust and Go clients — the same log file replays in any of
+them.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `dir` | — | WAL directory. Omit for in-memory-only dedup. |
+| `fsync` | `false` | Force each `sync()` to stable storage. Buffered writes are ~70x faster; an un-synced crash falls back to the broker's at-least-once redelivery. |
+| `ttlMs` | `0` | Drop dedup entries older than this. `0` disables the sweep. |
+| `maxCap` | `1000000` | Live seqs per consumer before FIFO eviction. |
+| `snapshotEveryN` | `0` | Records between auto-snapshots (speeds replay). |
+| `compactAtBytes` | `0` | Auto-compact on `sync()` once the log passes this size. |
+
+Entries are dropped as soon as the broker confirms them: every `AckBatchResp`
+carries a cursor, and one `AckStateReq` per subscribe and per reconnect fetches
+that cursor so a previous session's leftovers are purged. The live set stays
+small without any periodic job. `client.metrics().redeliveriesSkipped` counts
+the duplicate executions prevented.
+
+Run `npm run bench:ackstore` for the durability numbers on your own hardware.
+
 ## Client Metrics
 
 ```typescript
 const snap = client.metrics()
 // {
 //   publishesSent, publishBatchEntries, deliveriesReceived,
-//   activeSubscriptions, acksSent, nacksSent, reconnects, pendingReplies
+//   activeSubscriptions, acksSent, nacksSent, reconnects, pendingReplies,
+//   acksDeferred, acksConfirmed, acksExpired, redeliveriesSkipped
 // }
 ```
 

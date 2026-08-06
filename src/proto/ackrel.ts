@@ -51,6 +51,10 @@ export function packAckBatch(
 // offset 32: status      u32
 // offset 36: _pad        u32
 
+/** `AckStateRep.status` — the broker vouches for the cursor it just sent.
+ * Mirrors `ACK_STATUS_OK` in `arbitro-proto/src/v2/ingress/ack_state.rs`. */
+export const ACK_STATUS_OK = 0
+
 export interface AckStateRepBody {
   consumerId: number
   generation: bigint

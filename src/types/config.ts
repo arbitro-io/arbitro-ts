@@ -187,4 +187,22 @@ export interface ClientConfig {
   keepAlive?: KeepAliveConfig
   // Pino-compatible logger. Default: silent.
   logger?:    import('../common/logger').Logger
+  /**
+   * Redelivery-dedup store, keyed by `(streamName, consumerName, seq)`.
+   *
+   * OFF by default — omit it and delivery behaves exactly as it always has.
+   * Set `{}` for in-memory dedup, or `{ dir }` for a persistent write-ahead
+   * log so a restarted worker does not re-execute work it already completed:
+   *
+   * ```ts
+   * new ArbitroClient({ servers, ackStore: { dir: './.arbitro-ack' } })
+   * ```
+   *
+   * Writes are BUFFERED by default (`fsync: false`) — roughly 70x the
+   * throughput of fsync-per-op, at the cost of losing the log tail on an
+   * un-synced crash (which degrades to the broker's at-least-once redelivery,
+   * never to a wrong answer). Pass `fsync: true` when a duplicate execution
+   * costs more than the throughput.
+   */
+  ackStore?:  import('../ackstore').AckStoreConfig
 }

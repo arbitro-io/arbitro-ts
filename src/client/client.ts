@@ -25,6 +25,8 @@ import type { QueueOptions } from '../types/queue'
 import { AckPolicy, DeliverPolicy, JournalType } from '../types/config'
 import { Message } from '../message/message'
 import { BatchPublishEntry } from '../proto/publish'
+import { openAckStore } from '../ackstore'
+import type { SlotRef, Store } from '../ackstore'
 import { CronBuilder } from '../cron/cron-builder'
 import { CronState } from '../cron/cron-state'
 import { ServiceBuilder } from '../service'
@@ -36,7 +38,7 @@ type MsgCallback = (msg: Message) => void
  * `ClientConfig.timeout` used by management calls (create/get/list/...). */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
 
-const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger' | 'keepAlive'>> = {
+const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger' | 'keepAlive' | 'ackStore'>> = {
   servers: ['127.0.0.1:9898'],
   prefix: '',
   timeout: 5_000,
@@ -55,12 +57,19 @@ export class ArbitroClient {
   private readonly _metrics = new ClientMetrics()
   private readonly _cronState = new CronState()
   private _requestManager?: RequestReplyManager
+  /** Redelivery-dedup store; undefined unless `ackStore` was configured. */
+  private readonly _ackStore: Store | undefined
+  /** consumerId -> its dedup slot, for the broker-cursor purge callback. */
+  private readonly _slots = new Map<number, SlotRef>()
 
   constructor(config: ClientConfig) {
     this.cfg = { ...DEFAULT_CONFIG, ...config }
     this.tls = config.tls
     this.logger = config.logger
     this.keepAlive = config.keepAlive
+    // Opened eagerly (replaying the log is synchronous I/O) so a bad path or a
+    // corrupt store fails at construction rather than on first delivery.
+    this._ackStore = config.ackStore ? openAckStore(config.ackStore) : undefined
   }
 
   async connect(): Promise<this> {
@@ -71,8 +80,20 @@ export class ArbitroClient {
     )
     this.conn.setMetrics(this._metrics)
     this.conn.setCronState(this._cronState)
+    if (this._ackStore) this.conn.onAckConfirm = (cid, cursor) => this.confirmAckStoreUpTo(cid, cursor)
     this._requestManager = new RequestReplyManager(this.conn)
     return this
+  }
+
+  /** The configured dedup store, or `undefined`. Exposed for metrics and for
+   * advanced callers that want to drive compaction/snapshots themselves. */
+  get ackStore(): Store | undefined { return this._ackStore }
+
+  /** Drop dedup entries <= `cursor` for `consumerId`. Driven by the broker's
+   * authoritative cursor (AckBatchResp / AckStateRep), never by a local
+   * guess — see `Connection.handleAckStateRep`. */
+  private confirmAckStoreUpTo(consumerId: number, cursor: bigint): void {
+    this._slots.get(consumerId)?.confirmUpTo(cursor)
   }
 
   /**
@@ -341,19 +362,50 @@ export class ArbitroClient {
 
     const consumerId = await this.ensureConsumer(streamName, config)
     const filter = Buffer.from(config.filter ?? '')
-    const sub = new Subscription(consumerId, this.conn, streamName, subOpts?.fetchTimeoutMs ?? 5_000)
+    const slot = this.resolveSlot(streamName, config, consumerId)
+    const sub = new Subscription(
+      consumerId, this.conn, streamName, subOpts?.fetchTimeoutMs ?? 5_000, slot,
+    )
     const handler = (frame: Buffer) => sub.deliver(frame)
 
     await this.conn.sendSubscribeV2(consumerId, filter, handler)
+    // On-connect ackstore purge: the store may hold entries recorded by a
+    // previous, dead session whose AckBatchResp never arrived, so nothing
+    // confirmed them. Now that the subscribe is confirmed (the consumer
+    // provably exists server-side), ask for the broker's authoritative cursor
+    // once; `handleAckStateRep` drops everything at or below it. Reconnects
+    // are covered separately by `replayAckState`.
+    if (slot) this.conn.requestAckState(consumerId)
     this._metrics.activeSubscriptions++
     // Best-effort gauge decrement when caller closes the subscription.
     const origClose = sub.close.bind(sub)
     sub.close = () => {
       if (this._metrics.activeSubscriptions > 0) this._metrics.activeSubscriptions--
+      this._slots.delete(consumerId)
       return origClose()
     }
     if (callback) sub.onMessage(callback)
     return sub
+  }
+
+  /**
+   * Resolve this subscription's dedup slot, keyed by the DURABLE names — so
+   * it survives a consumer delete+recreate under the same name, and a
+   * different name is a fresh workload. `undefined` when no store is
+   * configured. A store error is non-fatal: dedup degrades to plain
+   * at-least-once rather than failing the subscribe.
+   */
+  private resolveSlot(
+    streamName: string, config: ConsumerConfig, consumerId: number,
+  ): SlotRef | undefined {
+    if (!this._ackStore) return undefined
+    try {
+      const slot = this._ackStore.slot(this.prefixed(streamName), config.name || streamName)
+      this._slots.set(consumerId, slot)
+      return slot
+    } catch {
+      return undefined
+    }
   }
 
   /**
@@ -735,6 +787,15 @@ export class ArbitroClient {
   async close(): Promise<void> {
     this._requestManager?.close()
     await this.conn.close()
+    // Final flush of buffered dedup records, then release the fd. Skipping
+    // this is what would lose the tail of the log on a clean shutdown — the
+    // one crash-equivalent we can actually prevent.
+    if (this._ackStore) {
+      try {
+        this._ackStore.sync()
+        this._ackStore.close()
+      } catch { /* a failed final flush must not fail close() */ }
+    }
   }
 }
 

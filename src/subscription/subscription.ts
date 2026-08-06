@@ -1,7 +1,12 @@
 import { Message } from '../message/message'
 import type { Connection } from '../net/connection'
+import type { SlotRef } from '../ackstore'
+import { HEADER_SIZE, OFF_SEQ } from '../proto/constants'
 
 type MsgCallback = (msg: Message) => void
+
+const OFF_CONSUMER_ID = HEADER_SIZE
+const OFF_SUBJECT_HASH = HEADER_SIZE + 4
 
 interface PendingFetch {
   resolve: (msgs: Message[]) => void
@@ -21,6 +26,9 @@ export class Subscription {
     private readonly conn: Connection,
     private readonly streamName: string,
     private readonly fetchTimeoutMs: number,
+    /** Redelivery-dedup handle for this `(stream, consumer)`. Undefined when
+     * no ackstore is configured — then delivery behaves exactly as before. */
+    private readonly slot?: SlotRef,
   ) {}
 
   /** Consumer ID assigned by the server. */
@@ -30,6 +38,21 @@ export class Subscription {
   deliver(frame: Buffer): void {
     if (this.closed) return
 
+    // Redelivery dedup: this seq was already recorded, so the handler ran and
+    // the ack was lost (or raced a reconnect). Re-ack and drop it — running
+    // the handler again is the duplicate execution the ackstore exists to
+    // prevent. The gate is a bounds probe first, so a first delivery costs no
+    // map lookup at all.
+    if (this.slot && this.slot.seen(frame.readBigUInt64LE(OFF_SEQ))) {
+      this.conn.enqueueAck(
+        frame.readUInt32LE(OFF_CONSUMER_ID),
+        frame.readUInt32LE(OFF_SUBJECT_HASH),
+        frame.readBigUInt64LE(OFF_SEQ),
+      )
+      this.conn.bumpRedeliveriesSkipped()
+      return
+    }
+
     const msg = new Message(
       frame,
       (f) => this.conn.send(f),
@@ -38,6 +61,7 @@ export class Subscription {
       () => this.conn.bumpNacksSent(),
       (consumerId, seq) => this.conn.ackRelay.record(consumerId, seq),
       (consumerId, subjectHash, seq) => this.conn.enqueueAck(consumerId, subjectHash, seq),
+      this.slot ? (seq) => this.slot!.record(seq) : undefined,
     )
 
     if (this.callback) {

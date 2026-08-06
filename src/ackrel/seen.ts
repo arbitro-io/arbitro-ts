@@ -1,5 +1,13 @@
 // Bounded FIFO dedup cache — mirrors `arbitro-client-tokio/src/ackrel/seen.rs`.
 //
+// SUPERSEDED by `src/ackstore`. This cache is keyed by the EPHEMERAL numeric
+// consumer id (which changes when a consumer is deleted and recreated) and
+// never touched disk, so a restarted worker re-executed work it had already
+// completed. The ackstore keys by the durable `(streamName, consumerName, seq)`
+// and can persist to a write-ahead log; it is what the delivery path actually
+// consults now (see `Subscription.deliver`). Kept only so existing importers
+// keep compiling — do not wire it into new code.
+//
 // Consulted in the deliver dispatch path before invoking the user's
 // message callback: if `(consumerId, seq)` was already seen (e.g. the
 // broker redelivered a message the client had already processed but

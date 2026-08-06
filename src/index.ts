@@ -23,6 +23,18 @@ export type { StepContext, StepResult, StepHandler, DecodedTask } from "./workfl
 
 export type { Logger, LogFn } from "./common/logger";
 
+/** Redelivery-dedup store (`ClientConfig.ackStore`). The WAL's on-disk format
+ * is byte-identical to the Rust and Go clients. */
+export { MemoryStore, Wal, AckStoreError, openAckStore } from "./ackstore";
+export type {
+  AckStoreConfig,
+  Store as AckStore,
+  SlotRef as AckStoreSlot,
+  SlotInfo as AckStoreSlotInfo,
+  StoreMetrics as AckStoreMetrics,
+  WalOptions,
+} from "./ackstore";
+
 export type {
   ClientConfig,
   StreamConfig,
