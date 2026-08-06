@@ -102,10 +102,6 @@ export class Stream {
     return this.client.publishBatch(this.name, messages)
   }
 
-  request(subject: string, data: Buffer, timeoutMs?: number): Promise<Buffer> {
-    return this.client.request(this.name, subject, data, timeoutMs)
-  }
-
   /** Tombstone a single message by seq. Returns true if found. */
   deleteMessage(seq: bigint): Promise<boolean> {
     return this.client.deleteMessage(this.name, seq)

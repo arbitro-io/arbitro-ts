@@ -300,7 +300,10 @@ const gateway = await client.service('gateway').build()
 const resp = await gateway.request('calculator', 'multiply', Buffer.from('3*4'), 5000)
 ```
 
-`msg.reply()` always works -- no need to check for reply_to presence.
+Handlers answer by returning a `Buffer`. There is no `reply()` to call: the
+framework publishes the return value to the requester and pairs it with
+exactly one ack or nack. Returning nothing acks without replying; throwing
+nacks for redelivery.
 
 ## Workflow Orchestration
 

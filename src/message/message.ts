@@ -96,7 +96,17 @@ export class Message {
     return this.frame.subarray(TAIL_OFF + this.subjLen() + this.replyLen())
   }
 
-  /** Reply to the sender. Decodes reply_to as [0xFF][stream_id LE u32][subject]. */
+  /**
+   * Reply to the sender. Decodes reply_to as [0xFF][stream_id LE u32][subject].
+   *
+   * @internal — this is how the service dispatcher ships a handler's return
+   * value, not a method callers drive. Only `Service.request` attaches a
+   * reply_to, so on any other delivery this returns without sending
+   * anything, and a method whose only reachable outcome is silence is worse
+   * than no method. Handlers answer by returning a `Buffer`; the framework
+   * then pairs the reply with exactly one ack or nack, which hand-rolled
+   * request/reply cannot guarantee.
+   */
   reply(payload: Buffer): void {
     const rt = this.replyTo()
     if (rt.length < 5 || rt[0] !== REPLY_TO_MAGIC) return

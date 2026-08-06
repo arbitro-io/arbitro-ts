@@ -142,8 +142,8 @@ export async function streamPublishBatch(
 /**
  * Publish with a reply-to subject, awaiting only the broker's `RepOk`
  * (no reply payload — actual request/reply correlation is handled by
- * `RequestReplyManager` in `client/request.ts`, used by
- * `ArbitroClient.request()`). `msgId` opts this publish into the target
+ * `Service.request()`, the only caller that attaches a reply address).
+ * `msgId` opts this publish into the target
  * stream's dedup window, same as `streamPublishAck`. Mirrors the Rust
  * client's `publish_with_reply` / `publish_with_reply_msg_id`.
  */

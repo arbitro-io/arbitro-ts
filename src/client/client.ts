@@ -8,7 +8,6 @@ import {
   streamPublish, streamPublishAck, streamPublishBatch, streamPublishWithReply,
   streamPublishFast,
 } from '../stream/publish'
-import { RequestReplyManager } from './request'
 import {
   packPublish, packCreateStream, packDeleteStream, packGetStream,
   packPurgeStream, packDrainSubject, packDeleteMessage, packListStreams,
@@ -33,11 +32,6 @@ import { ServiceBuilder } from '../service'
 
 type MsgCallback = (msg: Message) => void
 
-/** Default `client.request()` timeout. Matches the Rust client's
- * request-reply default (see `service.rs`) — independent of the generic
- * `ClientConfig.timeout` used by management calls (create/get/list/...). */
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
-
 const DEFAULT_CONFIG: Required<Omit<ClientConfig, 'tls' | 'logger' | 'keepAlive' | 'ackStore'>> = {
   servers: ['127.0.0.1:9898'],
   prefix: '',
@@ -56,7 +50,6 @@ export class ArbitroClient {
   private readonly sidCache = new Map<string, number>()
   private readonly _metrics = new ClientMetrics()
   private readonly _cronState = new CronState()
-  private _requestManager?: RequestReplyManager
   /** Redelivery-dedup store; undefined unless `ackStore` was configured. */
   private readonly _ackStore: Store | undefined
   /** consumerId -> its dedup slot, for the broker-cursor purge callback. */
@@ -81,7 +74,6 @@ export class ArbitroClient {
     this.conn.setMetrics(this._metrics)
     this.conn.setCronState(this._cronState)
     if (this._ackStore) this.conn.onAckConfirm = (cid, cursor) => this.confirmAckStoreUpTo(cid, cursor)
-    this._requestManager = new RequestReplyManager(this.conn)
     return this
   }
 
@@ -265,33 +257,6 @@ export class ArbitroClient {
       : messages
     this._metrics.publishBatchEntries += messages.length
     return streamPublishBatch(this.conn, sid, prefixedMsgs)
-  }
-
-  /**
-   * Request-reply: publishes `subject` on `streamName` with an encoded
-   * reply-to, and resolves with the responder's reply payload once it
-   * arrives. Requires a subscriber on `streamName` that calls
-   * `msg.reply(payload)` (or `Request`/`Service`-style handling).
-   *
-   * A private per-instance reply consumer is created lazily on
-   * `streamName` the first time `request()` targets it — see
-   * `RequestReplyManager`. `timeoutMs` defaults to 30s; on timeout the
-   * correlation entry is removed and the promise rejects with a typed
-   * `ArbitroError('request timeout', 'timeout')`.
-   */
-  async request(
-    streamName: string, subject: string, data: Buffer, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-    msgId?: Buffer,
-  ): Promise<Buffer> {
-    const sid = await this.resolveStreamId(streamName)
-    return this.requestManager().request(sid, this.prefixed(subject), data, timeoutMs, msgId)
-  }
-
-  private requestManager(): RequestReplyManager {
-    if (!this._requestManager) {
-      throw new ArbitroError('client not connected — call connect() first', 'connect')
-    }
-    return this._requestManager
   }
 
   /**
@@ -785,7 +750,6 @@ export class ArbitroClient {
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   async close(): Promise<void> {
-    this._requestManager?.close()
     await this.conn.close()
     // Final flush of buffered dedup records, then release the fd. Skipping
     // this is what would lose the tail of the log on a clean shutdown — the
