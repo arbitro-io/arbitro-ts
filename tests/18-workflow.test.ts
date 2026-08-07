@@ -16,6 +16,22 @@ function wait(ms: number): Promise<void> {
   return new Promise(r => setTimeout(r, ms))
 }
 
+/**
+ * Poll until `cond` holds, or give up after `timeoutMs`.
+ *
+ * Prefer this over `wait(n)` before an assertion: a fixed sleep long enough
+ * to be safe is also long enough to blow vitest's 5s test budget, and the
+ * test then dies before it ever evaluates the assertion — reporting a
+ * timeout for something that had already succeeded in milliseconds.
+ */
+async function waitUntil(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!cond() && Date.now() < deadline) await wait(25)
+}
+
+/** Give a workflow room to keep going, to catch work that should NOT happen. */
+const SETTLE_MS = 1500
+
 describe('workflow (stream-based)', () => {
   let client: ArbitroClient
 
@@ -78,7 +94,7 @@ describe('workflow (stream-based)', () => {
       .start()
 
     await wf.trigger(client, Buffer.from('test'))
-    await wait(5000)
+    await waitUntil(() => attempts >= 2)
     expect(attempts).toBeGreaterThanOrEqual(2)
   })
 
@@ -138,8 +154,11 @@ describe('workflow (stream-based)', () => {
       .start()
 
     await wf.trigger(client, Buffer.from('fail'))
-    await wait(5000)
-    // After 2 retries the message goes to DLQ, not infinite loop
+    // Wait for the ceiling, then keep waiting: the point of this test is that
+    // nothing MORE happens, so it has to outlive a would-be extra retry.
+    await waitUntil(() => attempts >= 3)
+    await wait(SETTLE_MS)
+    // After maxRetries the message goes to DLQ, not an infinite loop.
     expect(attempts).toBeGreaterThanOrEqual(2)
     expect(attempts).toBeLessThan(10) // proves it stopped
   })
@@ -161,7 +180,7 @@ describe('workflow (stream-based)', () => {
       .start()
 
     await wf.trigger(client, Buffer.from('order'))
-    await wait(5000)
+    await waitUntil(() => compensated)
     expect(compensated).toBe(true)
   })
 

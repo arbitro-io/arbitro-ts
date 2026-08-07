@@ -4,7 +4,7 @@
 
 import type { ArbitroClient } from '../client/client'
 import type { Message } from '../message/message'
-import { AckPolicy } from '../types/config'
+import { AckPolicy, DeliverPolicy } from '../types/config'
 import { encodeTask, decodePark } from './task'
 import { WorkflowHandle, allocInstanceId } from './handle'
 import { processMessage, type ProcessorConfig } from './processor'
@@ -224,6 +224,10 @@ export class WorkflowBuilder {
       group: `_wf_${cfg.name}_workers`,
       filter: taskSubject,
       ackPolicy: AckPolicy.Explicit,
+      // Explicit, matching the Rust client's worker consumer: a retry is a
+      // NEW message published after this consumer exists, and anything but
+      // All risks the worker never seeing it.
+      deliverPolicy: DeliverPolicy.All,
       ackWaitMs: this.ackWaitMs,
       maxAckPending: this.maxInflightVal,
     }, (msg: Message) => { void processMessage(cfg, msg) })
