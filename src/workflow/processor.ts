@@ -244,7 +244,25 @@ async function onFailure(
     await publishDlq(cfg, task, err)
     await publishCompensations(cfg, task)
     msg.ack()
-  } else {
+    return
+  }
+
+  // Republish with attempt+1 rather than nack: `attempt` lives in the payload,
+  // so a nack redelivers the same bytes and the counter never moves. The
+  // msg_id's last field is the attempt, so bumping it dodges the idempotency
+  // window. Matches the Rust client (`workflow.rs`).
+  const next = task.attempt + 1
+  try {
+    await cfg.client.publish(
+      cfg.taskStreamName,
+      `_wf.${cfg.name}.step.${task.stepIndex}`,
+      encodeTask(task.instanceId, task.stepIndex, next, task.context),
+      { msgId: `wf:${task.instanceId}:${task.stepIndex}:${next}` },
+    )
+    // Ack only once the retry is queued.
+    msg.ack()
+  } catch {
+    // Retry not queued — fall back to redelivery so the task is not lost.
     msg.nack()
   }
 }
