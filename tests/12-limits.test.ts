@@ -49,8 +49,8 @@ describe('ConsumerConfig limits', () => {
   // ── maxSubjectInflights — wire-exposed via CreateConsumer trailer ─────────
   //
   // Each entry caps in-flight (delivered, unacked) messages per subject
-  // matching `pattern`. Only enforced with AckPolicy.Explicit; ignored
-  // server-side for fire-and-forget consumers.
+  // matching `pattern`. Requires AckPolicy.Explicit — pairing it with
+  // AckPolicy.None is rejected at CreateConsumer, not ignored.
 
   it('maxSubjectInflights with wildcard patterns and uncapped subjects', async () => {
 
@@ -106,31 +106,31 @@ describe('ConsumerConfig limits', () => {
     sub.close()
   })
 
-  it('maxSubjectInflights silently dropped for AckPolicy.None', async () => {
+  it('maxSubjectInflights is rejected for AckPolicy.None', async () => {
     const name = scope.track(uniqueName('lim'))
     await client.createStream(name, {
       subjectFilter: `${name}.>`,
       journal: { type: JournalType.Memory },
     })
-    // Fire-and-forget consumers can't enforce per-subject inflight
-    // (no ack-tracking). The server accepts the consumer and ignores
-    // the limits — verifying no error and no enforcement.
+
+    // A fire-and-forget consumer never acks, so the broker cannot count what
+    // is in flight and a per-subject inflight cap has nothing to measure.
+    // The server rejects the pair at CreateConsumer rather than accepting a
+    // limit it will not apply — silently ignoring it was the worse of the
+    // two, because the caller believes it is capped and it is not.
     await expect(client.createConsumer(name, {
       name,
       filter: `${name}.>`,
       ackPolicy: AckPolicy.None,
       maxSubjectInflights: [{ pattern: `${name}.same`, limit: 2 }],
-    })).resolves.toBeDefined()
+    })).rejects.toThrow()
 
-    const received: unknown[] = []
-    const sub = await client.subscribe(name, (msg) => {
-      received.push(msg)
-    })
-    for (let i = 0; i < 10; i++) {
-      client.publish(name, `${name}.same`, Buffer.from(`msg-${i}`))
-    }
-    await waitUntil(() => received.length >= 10)
-    expect(received.length).toBe(10)
-    sub.close()
+    // The same limits are accepted once the consumer can actually ack.
+    await expect(client.createConsumer(name, {
+      name,
+      filter: `${name}.>`,
+      ackPolicy: AckPolicy.Explicit,
+      maxSubjectInflights: [{ pattern: `${name}.same`, limit: 2 }],
+    })).resolves.toBeDefined()
   })
 })
