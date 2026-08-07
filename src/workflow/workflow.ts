@@ -144,9 +144,13 @@ export class WorkflowBuilder {
     if (this.steps.length === 0) throw new Error('at least one step required')
 
     const name = this.workflowName
-    const taskStream = `_wf.${name}.tasks`
+    // Stream names use underscores, subjects use dots — they are different
+    // namespaces and the broker validates them differently. Matches the Rust
+    // reference client (`workflow.rs`: `_wf_{name}_tasks` / `_wf.{name}.>`);
+    // the dotted stream names here were rejected outright with InvalidLength.
+    const taskStream = `_wf_${name}_tasks`
     const taskSubject = `_wf.${name}.>`
-    const dlqStream = `_wf.${name}.dlq`
+    const dlqStream = `_wf_${name}_dlq`
     const dlqSubject = `_wf.${name}.dlq.>`
 
     // State stream for cross-worker suspend registry.

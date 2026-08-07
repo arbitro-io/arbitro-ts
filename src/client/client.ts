@@ -28,6 +28,7 @@ import { openAckStore } from '../ackstore'
 import type { SlotRef, Store } from '../ackstore'
 import { CronBuilder } from '../cron/cron-builder'
 import { CronState } from '../cron/cron-state'
+import { WorkflowBuilder } from '../workflow'
 import { ServiceBuilder } from '../service'
 
 type MsgCallback = (msg: Message) => void
@@ -745,6 +746,21 @@ export class ArbitroClient {
   /** Start building a cron job. Call `.every()` then `.run()` to register. */
   cron(name: string): CronBuilder {
     return new CronBuilder(this.conn, this._cronState, name)
+  }
+
+  // ── Workflow orchestration ────────────────────────────────────────────────
+
+  /**
+   * Start building a workflow pipeline. Uses streams + consumer groups
+   * internally — the broker has no workflow-specific code.
+   *
+   * Mirrors `Client::workflow` in the Rust reference client. The builder
+   * itself was always here and exported; only this entry point went missing
+   * when the module moved client-side, which left `client.workflow()`
+   * undefined while Rust kept it.
+   */
+  workflow(name: string): WorkflowBuilder {
+    return new WorkflowBuilder(this, name)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
