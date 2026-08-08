@@ -4,12 +4,11 @@ All notable changes to `@arbitro/client` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project uses SemVer with
 the pre-1.0 interpretation described in `RELEASING.md`.
 
-## [Unreleased]
+## [0.7.0] - 2026-08-08
 
-Carries a breaking API change, so the next release is a minor bump under the
-pre-1.0 policy in `RELEASING.md`. Pairs with a broker built from
-`arbitro-server` at or after the hierarchical-wheel work — `nackDelay` is only
-accurate against that.
+Carries a breaking API change, so this is a minor bump under the pre-1.0 policy
+in `RELEASING.md`. Requires `arbitro-server >= 0.7.0` — `nackDelay` is only
+accurate against a broker with the hierarchical timing wheel.
 
 ### Breaking
 - **`client.request()` removed.** Reply is now confined to the service handler.
@@ -89,4 +88,5 @@ and reconnect story to parity with the Rust reference client, and pairs with
 - Correctness pass: `FanoutBatch` dispatch, upsert error surfacing,
   `DeliverPolicy` handling, `msgId` propagation, input validation, and metrics.
 
+[0.7.0]: https://github.com/arbitro-io/arbitro-ts/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/arbitro-io/arbitro-ts/compare/v0.6.1...v0.6.2
