@@ -264,6 +264,7 @@ export class Connection {
   private onFrame(frame: Buffer): void {
     const action = frame.readUInt16LE(OFF_ACTION) as Action
 
+
     switch (action) {
       case Action.RepOk:
       case Action.ListStreams:

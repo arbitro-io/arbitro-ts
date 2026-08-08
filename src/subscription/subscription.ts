@@ -84,8 +84,23 @@ export class Subscription {
   }
 
   // Push mode — set a callback to receive messages as they arrive.
+  //
+  // Anything already parked in `msgBuf` is handed over too. A delivery that
+  // beat the callback into place would otherwise sit in the pull-mode buffer
+  // forever: `deliver` parks it, nothing in push mode ever reads it again,
+  // and `close()` discards it. Worse than a drop, because no counter moves.
+  //
+  // That race is real and routine — the broker serves a pre-existing backlog
+  // the instant it processes Subscribe, often in the same TCP segment as its
+  // own RepOk, and the framer dispatches synchronously while the caller's
+  // `await` continuation is still only a queued microtask.
   onMessage(cb: MsgCallback): void {
     this.callback = cb
+    if (this.msgBuf.length === 0) return
+    // Splice first: a callback that re-enters (fetch, close, another
+    // onMessage) must not see the same message twice.
+    const parked = this.msgBuf.splice(0)
+    for (const msg of parked) cb(msg)
   }
 
   // Pull mode — fetch up to `count` messages, waiting up to `timeoutMs`.

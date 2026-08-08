@@ -334,6 +334,16 @@ export class ArbitroClient {
     )
     const handler = (frame: Buffer) => sub.deliver(frame)
 
+    // Callback attached BEFORE the subscribe round-trip, not after it. The
+    // broker starts serving a pre-existing backlog the moment it processes
+    // Subscribe — frequently in the same TCP segment as its own RepOk — and
+    // the framer dispatches that synchronously, while the `await` below has
+    // only queued a microtask. Attaching afterwards left a window in which
+    // `deliver` found no callback and parked the message in the pull-mode
+    // buffer. `onMessage` drains that buffer as well, so both ends of the
+    // race are covered.
+    if (callback) sub.onMessage(callback)
+
     await this.conn.sendSubscribeV2(consumerId, filter, handler)
     // On-connect ackstore purge: the store may hold entries recorded by a
     // previous, dead session whose AckBatchResp never arrived, so nothing
@@ -350,7 +360,6 @@ export class ArbitroClient {
       this._slots.delete(consumerId)
       return origClose()
     }
-    if (callback) sub.onMessage(callback)
     return sub
   }
 
