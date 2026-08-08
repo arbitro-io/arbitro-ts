@@ -27,6 +27,15 @@ export interface ClientMetricsSnapshot {
   acksExpired:          number
   /** Redeliveries skipped because the ackstore had already recorded the seq. */
   redeliveriesSkipped:  number
+  /**
+   * Deliveries the broker sent for a consumer this client has no route for,
+   * and therefore threw away.
+   *
+   * A few are normal right after `close()` — the broker may already have a
+   * batch in flight. A number that keeps climbing is message loss, and it is
+   * silent without this counter.
+   */
+  deliveriesDropped:    number
 }
 
 /**
@@ -50,6 +59,7 @@ export class ClientMetrics {
   acksConfirmed        = 0
   acksExpired          = 0
   redeliveriesSkipped  = 0
+  deliveriesDropped    = 0
 
   snapshot(): ClientMetricsSnapshot {
     return {
@@ -65,6 +75,7 @@ export class ClientMetrics {
       acksConfirmed:       this.acksConfirmed,
       acksExpired:         this.acksExpired,
       redeliveriesSkipped: this.redeliveriesSkipped,
+      deliveriesDropped:   this.deliveriesDropped,
     }
   }
 }

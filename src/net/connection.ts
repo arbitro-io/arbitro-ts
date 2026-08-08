@@ -279,7 +279,7 @@ export class Connection {
         const consumerId = frame.readUInt32LE(HEADER_SIZE)
         const handler = this.routes.get(consumerId)
         if (!handler) {
-          this.log.warn({ consumerId }, 'delivery for unknown consumer')
+          this.dropDelivery(consumerId, 1)
           return
         }
         if (this.metrics) this.metrics.deliveriesReceived++
@@ -348,6 +348,17 @@ export class Connection {
     this.onAckStateRep?.(body)
   }
 
+  /**
+   * A delivery arrived for a consumer this client has no route for, so it is
+   * gone. A few are expected straight after `close()` — the broker can already
+   * have a batch in flight — but a count that keeps rising is silent message
+   * loss, which is exactly what this exists to make audible.
+   */
+  private dropDelivery(consumerId: number, count: number): void {
+    if (this.metrics) this.metrics.deliveriesDropped += count
+    this.log.warn({ consumerId, count }, 'delivery dropped: no route for consumer')
+  }
+
   private handleBatchDeliver(frame: Buffer): void {
     if (frame.length < HEADER_SIZE + 4) return
     const count = frame.readUInt16LE(HEADER_SIZE)
@@ -367,7 +378,15 @@ export class Connection {
       if (tailEnd > frame.length) break
 
       const handler = this.routes.get(consumerId)
-      if (handler) {
+      // Was a bare `if (handler)` with no else, so a batch for an unrouted
+      // consumer vanished with no log, no metric, nothing. That silence is
+      // how the subscribe-ordering defect went unnoticed.
+      if (!handler) {
+        this.dropDelivery(consumerId, 1)
+        off = tailEnd
+        continue
+      }
+      {
         const payloadLen = dataLen - subjectLen - replyLen
         const bodyLen = 12 + subjectLen + replyLen + payloadLen
         const single = Buffer.allocUnsafe(HEADER_SIZE + bodyLen)
@@ -421,18 +440,39 @@ export class Connection {
   ): Promise<number> {
     return new Promise((resolve, reject) => {
       const seq = this.nextSeq()
-      const timer = setTimeout(
-        () => { this.pending.delete(seq); reject(new ArbitroError('subscribe timeout', 'timeout')) },
+
+      // Route registered BEFORE the frame goes out, mirroring step 1 of
+      // arbitro-client-tokio's `subscribe_async`. The broker starts serving
+      // the backlog as soon as it processes Subscribe, and that batch can
+      // reach us ahead of its own RepOk. Registering in the reply handler
+      // left a window where `handleBatchDeliver` found no route and dropped
+      // the whole batch — measured at roughly two rounds in five against a
+      // stream that already held messages.
+      this.routes.set(consumerId, handler)
+      this.activeSubs.set(consumerId, { consumerId, filter, handler, onRenew })
+
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const fail = (err: Error): void => {
+        if (timer) clearTimeout(timer)
+        // The subscribe never took, so the route must not outlive it.
+        this.routes.delete(consumerId)
+        this.activeSubs.delete(consumerId)
+        reject(err)
+      }
+
+      timer = setTimeout(
+        () => {
+          this.pending.delete(seq)
+          fail(new ArbitroError('subscribe timeout', 'timeout'))
+        },
         5_000,
       )
       this.pending.set(seq, {
         resolve: (_frame) => {
-          clearTimeout(timer)
-          this.routes.set(consumerId, handler)
-          this.activeSubs.set(consumerId, { consumerId, filter, handler, onRenew })
+          if (timer) clearTimeout(timer)
           resolve(consumerId)
         },
-        reject: (err) => { clearTimeout(timer); reject(err) },
+        reject: fail,
       })
       this.socket.write(packSubscribe(seq, this.connId, consumerId, filter))
     })
